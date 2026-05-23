@@ -1,0 +1,7 @@
+interface:
+  display_name: "北航 RAG 项目助手"
+  short_description: "按计划辅助开发北航课程资料 RAG 项目与评测"
+  default_prompt: "Use $buaa-rag-project to help me implement today's RAG project task."
+
+policy:
+  allow_implicit_invocation: true
