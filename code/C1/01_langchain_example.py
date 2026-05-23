@@ -18,7 +18,7 @@ loader = UnstructuredMarkdownLoader(markdown_path)
 docs = loader.load()
 
 # 文本分块
-text_splitter = RecursiveCharacterTextSplitter()
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=0)
 chunks = text_splitter.split_documents(docs)
 
 # 中文嵌入模型
@@ -49,11 +49,11 @@ prompt = ChatPromptTemplate.from_template("""请根据下面提供的上下文�
 
 # 使用 AIHubmix
 llm = ChatOpenAI(
-    model="glm-4.7-flash-free",
+    model="deepseek-v4-flash",
     temperature=0.7,
     max_tokens=4096,
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://aihubmix.com/v1"
+    api_key=os.getenv("DEEPSEEK_API_KEY_RAGLEARN"),
+    base_url="https://api.deepseek.com"
 )
 
 # llm = ChatOpenAI(
@@ -72,4 +72,4 @@ retrieved_docs = vectorstore.similarity_search(question, k=3)
 docs_content = "\n\n".join(doc.page_content for doc in retrieved_docs)
 
 answer = llm.invoke(prompt.format(question=question, context=docs_content))
-print(answer)
+print(answer.content)

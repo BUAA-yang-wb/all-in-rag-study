@@ -72,4 +72,5 @@ rag/
 *.key
 *.secret
 
-my_docs/
+my_docs/api_key.txt
+my_docs/RAG项目学习背景说明.md
