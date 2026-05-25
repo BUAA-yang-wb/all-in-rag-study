@@ -1,0 +1,4 @@
+# Course RAG runtime dependencies.
+# Recommended Python: 3.12. Minimum for the Docling-first loader: 3.10.
+docling
+pypdf
