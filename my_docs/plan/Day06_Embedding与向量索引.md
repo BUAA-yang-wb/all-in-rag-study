@@ -53,6 +53,3 @@ python -m app.rag.indexing --data data/samples --rebuild
 - 一个 Top-K 检索输出样例。
 - `my_docs/Day06_Embedding与索引记录.md`
 
-## 风险处理
-
-如果模型下载慢，先记录环境问题，并保留模型名配置项。主线目标是把索引构建流程写清楚，不要为了换复杂模型消耗太多时间。

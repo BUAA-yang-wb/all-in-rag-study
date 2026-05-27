@@ -77,3 +77,4 @@ Thumbs.db
 my_docs/api_key.txt
 my_docs/RAG项目学习背景说明.md
 course_rag/data
+course_rag/vector_index/
