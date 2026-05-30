@@ -9,3 +9,4 @@ langchain-openai
 python-dotenv
 faiss-cpu
 sentence-transformers
+rank-bm25
