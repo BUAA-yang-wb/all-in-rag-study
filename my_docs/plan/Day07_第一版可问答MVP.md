@@ -34,7 +34,6 @@ python -m app.main_cli "这门课的期末复习重点是什么？"
    - citations
    - source
    - chunk text preview
-5. 保存 5 个成功问答样例，后续放入 README。
 
 ## 验收标准
 

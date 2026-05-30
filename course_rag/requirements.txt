@@ -2,6 +2,10 @@
 # Recommended Python: 3.12. Minimum for the Docling-first loader: 3.10.
 docling
 pypdf
+fastapi
+uvicorn
 langchain-text-splitters
+langchain-openai
+python-dotenv
 faiss-cpu
 sentence-transformers

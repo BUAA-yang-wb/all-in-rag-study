@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Course RAG Demo</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --panel-2: #f9fafb;
+      --text: #172033;
+      --muted: #657085;
+      --border: #d9dee8;
+      --accent: #2563eb;
+      --accent-2: #0f766e;
+      --danger: #b42318;
+      --warning: #a15c07;
+      --shadow: 0 10px 30px rgba(31, 41, 55, 0.08);
+      --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+      line-height: 1.5;
+    }
+
+    button,
+    input,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      border-radius: 6px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      font-weight: 650;
+      min-height: 40px;
+      padding: 0 16px;
+    }
+
+    button.secondary {
+      background: #334155;
+    }
+
+    button.ghost {
+      background: #e7eefc;
+      color: #1745a4;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.65;
+    }
+
+    input,
+    textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      outline: none;
+      padding: 10px 12px;
+    }
+
+    textarea {
+      min-height: 136px;
+      resize: vertical;
+    }
+
+    input:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      color: #293449;
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .shell {
+      display: grid;
+      gap: 20px;
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 16px;
+      padding-bottom: 4px;
+    }
+
+    .title {
+      display: grid;
+      gap: 4px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(24px, 3vw, 38px);
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+
+    .subtle {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .status-strip,
+    .workspace,
+    .debug-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .status-strip {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .workspace {
+      grid-template-columns: minmax(360px, 0.95fr) minmax(0, 1.35fr);
+      align-items: start;
+    }
+
+    .debug-grid {
+      grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.2fr);
+      align-items: start;
+    }
+
+    .panel,
+    .metric,
+    .message {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .panel {
+      display: grid;
+      gap: 16px;
+      padding: 18px;
+    }
+
+    .metric {
+      display: grid;
+      gap: 5px;
+      min-height: 84px;
+      padding: 14px;
+      box-shadow: none;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .metric strong {
+      overflow-wrap: anywhere;
+      font-size: 16px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .full {
+      grid-column: 1 / -1;
+    }
+
+    .check-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 18px;
+      align-items: center;
+    }
+
+    .check-row label {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      font-weight: 600;
+    }
+
+    .check-row input {
+      width: auto;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .answer,
+    .empty,
+    .json-block {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-2);
+      padding: 14px;
+    }
+
+    .answer {
+      min-height: 180px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .empty {
+      color: var(--muted);
+      min-height: 96px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+    }
+
+    .json-block {
+      max-height: 280px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+    }
+
+    .list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .item {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      padding: 12px;
+    }
+
+    .item-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .source {
+      overflow-wrap: anywhere;
+      font-weight: 700;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .text {
+      color: #273449;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      border-radius: 999px;
+      background: #e7eefc;
+      color: #1745a4;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 0 10px;
+      white-space: nowrap;
+    }
+
+    .pill.ok {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .pill.warn {
+      background: #fef3c7;
+      color: var(--warning);
+    }
+
+    .pill.err {
+      background: #fee4e2;
+      color: var(--danger);
+    }
+
+    .message {
+      display: none;
+      padding: 12px 14px;
+      box-shadow: none;
+    }
+
+    .message.show {
+      display: block;
+    }
+
+    .message.error {
+      border-color: #f3b8b3;
+      background: #fff3f2;
+      color: var(--danger);
+    }
+
+    .message.warning {
+      border-color: #f4d38a;
+      background: #fffbeb;
+      color: var(--warning);
+    }
+
+    .message.success {
+      border-color: #9ed8b4;
+      background: #f0fdf4;
+      color: #166534;
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tab-button {
+      min-height: 36px;
+      background: #e9edf5;
+      color: #334155;
+    }
+
+    .tab-button.active {
+      background: var(--accent-2);
+      color: #fff;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    @media (max-width: 900px) {
+      .topbar,
+      .workspace,
+      .debug-grid,
+      .status-strip {
+        grid-template-columns: 1fr;
+      }
+
+      .toolbar {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 620px) {
+      .shell {
+        padding: 16px;
+      }
+
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .actions {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="title">
+        <h1>Course RAG Demo</h1>
+        <p class="subtle">FastAPI 本地问答与检索调试台</p>
+      </div>
+      <div class="toolbar">
+        <span id="liveStatus" class="pill warn">checking</span>
+        <button id="refreshHealth" class="ghost" type="button">刷新状态</button>
+        <button id="loadIndex" class="secondary" type="button">加载索引</button>
+        <a class="pill" href="/docs" target="_blank" rel="noreferrer">Swagger</a>
+      </div>
+    </header>
+
+    <section class="status-strip" aria-label="服务状态">
+      <div class="metric">
+        <span>服务</span>
+        <strong id="healthStatus">-</strong>
+      </div>
+      <div class="metric">
+        <span>索引文件</span>
+        <strong id="indexExists">-</strong>
+      </div>
+      <div class="metric">
+        <span>内存索引</span>
+        <strong id="indexLoaded">-</strong>
+      </div>
+      <div class="metric">
+        <span>向量数量 / 模型</span>
+        <strong id="indexInfo">-</strong>
+      </div>
+    </section>
+
+    <div id="globalMessage" class="message" role="status"></div>
+
+    <section class="workspace" aria-label="问答">
+      <form id="askForm" class="panel">
+        <div>
+          <h2>问答</h2>
+          <p class="subtle">调用 POST /ask</p>
+        </div>
+        <label class="full">
+          问题
+          <textarea id="question" name="question" placeholder="例如：编译过程有哪些阶段？"></textarea>
+        </label>
+        <div class="form-grid">
+          <label>
+            top_k
+            <input id="askTopK" name="top_k" type="number" min="1" max="20" value="5">
+          </label>
+          <label>
+            candidate_k
+            <input id="askCandidateK" name="candidate_k" type="number" min="1" max="100" placeholder="默认">
+          </label>
+        </div>
+        <div class="check-row">
+          <label><input id="askUseLlm" type="checkbox" checked> 使用 LLM</label>
+          <label><input id="askUseParent" type="checkbox" checked> 父文档上下文</label>
+        </div>
+        <div class="actions">
+          <button id="askButton" type="submit">发送问题</button>
+          <span class="subtle" id="askMeta">等待输入</span>
+        </div>
+      </form>
+
+      <section class="panel">
+        <div class="item-head">
+          <div>
+            <h2>回答</h2>
+            <p class="subtle" id="answerMeta">尚未请求</p>
+          </div>
+          <span id="usedLlm" class="pill warn">LLM -</span>
+        </div>
+        <div id="llmWarning" class="message warning"></div>
+        <div id="answer" class="answer">问题提交后，答案会显示在这里。</div>
+
+        <div class="tabs" aria-label="结果视图">
+          <button class="tab-button active" type="button" data-tab="citations">引用</button>
+          <button class="tab-button" type="button" data-tab="retrieval">检索</button>
+          <button class="tab-button" type="button" data-tab="raw">JSON</button>
+        </div>
+        <div id="citationsPanel" class="list"></div>
+        <div id="retrievalPanel" class="list hidden"></div>
+        <pre id="rawPanel" class="json-block hidden"></pre>
+      </section>
+    </section>
+
+    <section class="debug-grid" aria-label="检索调试">
+      <form id="searchForm" class="panel">
+        <div>
+          <h2>检索调试</h2>
+          <p class="subtle">调用 POST /search</p>
+        </div>
+        <label class="full">
+          查询
+          <textarea id="searchQuery" name="query" placeholder="例如：运输层的主要功能是什么？"></textarea>
+        </label>
+        <div class="form-grid">
+          <label>
+            top_k
+            <input id="searchTopK" name="top_k" type="number" min="1" max="20" value="5">
+          </label>
+          <label>
+            candidate_k
+            <input id="searchCandidateK" name="candidate_k" type="number" min="1" max="100" placeholder="默认">
+          </label>
+        </div>
+        <div class="check-row">
+          <label><input id="searchUseParent" type="checkbox" checked> 父文档上下文</label>
+        </div>
+        <div class="actions">
+          <button id="searchButton" type="submit">检索</button>
+          <span class="subtle" id="searchMeta">等待输入</span>
+        </div>
+      </form>
+
+      <section class="panel">
+        <div>
+          <h2>检索结果</h2>
+          <p class="subtle" id="searchResultMeta">尚未请求</p>
+        </div>
+        <div id="searchResults" class="list">
+          <div class="empty">检索结果会显示来源、页码、章节、分数和命中片段。</div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      lastAsk: null,
+      activeTab: "citations",
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function numberOrNull(id) {
+      const value = $(id).value.trim();
+      return value === "" ? null : Number(value);
+    }
+
+    function compactSource(item) {
+      return item.source_name || item.source || "unknown source";
+    }
+
+    function compactLocation(item) {
+      const parts = [];
+      if (item.course) parts.push(item.course);
+      if (item.category) parts.push(item.category);
+      if (item.page !== null && item.page !== undefined && item.page !== "") {
+        parts.push(`page ${item.page}`);
+      }
+      if (item.section_path || item.section) {
+        parts.push(item.section_path || item.section);
+      }
+      return parts.join(" | ");
+    }
+
+    function setBusy(button, busy, label) {
+      button.disabled = busy;
+      if (!button.dataset.readyLabel) {
+        button.dataset.readyLabel = button.textContent;
+      }
+      button.textContent = busy ? label : button.dataset.readyLabel;
+    }
+
+    function showMessage(text, type = "error") {
+      const el = $("globalMessage");
+      el.textContent = text;
+      el.className = `message show ${type}`;
+    }
+
+    function clearMessage() {
+      const el = $("globalMessage");
+      el.textContent = "";
+      el.className = "message";
+    }
+
+    async function requestJson(url, options = {}) {
+      const response = await fetch(url, {
+        headers: { "Content-Type": "application/json" },
+        ...options,
+      });
+      const text = await response.text();
+      let payload = null;
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          payload = { detail: text };
+        }
+      }
+      if (!response.ok) {
+        const detail = payload?.detail || response.statusText;
+        throw new Error(`HTTP ${response.status}: ${detail}`);
+      }
+      return payload;
+    }
+
+    function updateHealth(data) {
+      $("healthStatus").textContent = data.status ?? "-";
+      $("indexExists").textContent = data.index_exists ? "存在" : "缺失";
+      $("indexLoaded").textContent = data.index_loaded ? "已加载" : "未加载";
+      $("indexInfo").textContent = data.index
+        ? `${data.index.vectors} / ${data.index.embedding_model || "-"}`
+        : "-";
+
+      const liveStatus = $("liveStatus");
+      liveStatus.textContent = data.status || "unknown";
+      liveStatus.className = data.status === "ok" ? "pill ok" : "pill warn";
+    }
+
+    async function refreshHealth() {
+      try {
+        clearMessage();
+        const data = await requestJson("/health");
+        updateHealth(data);
+      } catch (error) {
+        $("liveStatus").textContent = "offline";
+        $("liveStatus").className = "pill err";
+        showMessage(error.message);
+      }
+    }
+
+    async function loadIndex() {
+      const button = $("loadIndex");
+      try {
+        clearMessage();
+        setBusy(button, true, "加载中");
+        const data = await requestJson("/ingest", {
+          method: "POST",
+          body: JSON.stringify({ rebuild: false }),
+        });
+        await refreshHealth();
+        showMessage(data.message || "索引已加载", "success");
+      } catch (error) {
+        showMessage(error.message);
+      } finally {
+        setBusy(button, false);
+      }
+    }
+
+    function renderItems(items, targetId, emptyText) {
+      const target = $(targetId);
+      if (!items || items.length === 0) {
+        target.innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
+        return;
+      }
+
+      target.innerHTML = items.map((item) => {
+        const score = Number.isFinite(Number(item.score))
+          ? Number(item.score).toFixed(4)
+          : "-";
+        const location = compactLocation(item);
+        const preview = item.context_preview || item.text || item.chunk_preview || "";
+        return `
+          <article class="item">
+            <div class="item-head">
+              <div>
+                <div class="source">[${escapeHtml(item.id ?? item.rank ?? "-")}] ${escapeHtml(compactSource(item))}</div>
+                <div class="meta">${escapeHtml(location || "no location metadata")}</div>
+              </div>
+              <span class="pill">score ${escapeHtml(score)}</span>
+            </div>
+            <div class="text">${escapeHtml(preview)}</div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function renderAsk(data) {
+      state.lastAsk = data;
+      $("answer").textContent = data.answer || "无回答";
+      $("answerMeta").textContent = data.question || "已完成";
+      $("askMeta").textContent = `${data.citations?.length || 0} 条引用`;
+      $("usedLlm").textContent = data.used_llm ? "LLM 已使用" : "检索回退";
+      $("usedLlm").className = data.used_llm ? "pill ok" : "pill warn";
+
+      const warning = $("llmWarning");
+      if (data.llm_error) {
+        warning.textContent = `LLM 调用失败：${data.llm_error}`;
+        warning.className = "message show warning";
+      } else {
+        warning.textContent = "";
+        warning.className = "message warning";
+      }
+
+      renderItems(data.citations, "citationsPanel", "没有返回引用。");
+      renderItems(data.retrieval, "retrievalPanel", "没有返回检索片段。");
+      $("rawPanel").textContent = JSON.stringify(data, null, 2);
+      setActiveTab(state.activeTab);
+    }
+
+    async function submitAsk(event) {
+      event.preventDefault();
+      const question = $("question").value.trim();
+      if (!question) {
+        showMessage("请输入问题。");
+        return;
+      }
+
+      const candidateK = numberOrNull("askCandidateK");
+      const payload = {
+        question,
+        top_k: Number($("askTopK").value || 5),
+        use_llm: $("askUseLlm").checked,
+        use_parent_context: $("askUseParent").checked,
+      };
+      if (candidateK !== null) payload.candidate_k = candidateK;
+
+      const button = $("askButton");
+      try {
+        clearMessage();
+        setBusy(button, true, "请求中");
+        $("askMeta").textContent = "请求中";
+        const data = await requestJson("/ask", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        renderAsk(data);
+        await refreshHealth();
+      } catch (error) {
+        $("askMeta").textContent = "请求失败";
+        showMessage(error.message);
+      } finally {
+        setBusy(button, false);
+      }
+    }
+
+    function renderSearch(data) {
+      $("searchResultMeta").textContent =
+        `${data.strategy || "search"} | top_k=${data.top_k} | ${data.citations?.length || 0} 条`;
+      $("searchMeta").textContent = `${data.citations?.length || 0} 条结果`;
+      renderItems(data.retrieval || data.citations, "searchResults", "没有返回检索结果。");
+    }
+
+    async function submitSearch(event) {
+      event.preventDefault();
+      const query = $("searchQuery").value.trim();
+      if (!query) {
+        showMessage("请输入检索查询。");
+        return;
+      }
+
+      const candidateK = numberOrNull("searchCandidateK");
+      const payload = {
+        query,
+        top_k: Number($("searchTopK").value || 5),
+        use_parent_context: $("searchUseParent").checked,
+      };
+      if (candidateK !== null) payload.candidate_k = candidateK;
+
+      const button = $("searchButton");
+      try {
+        clearMessage();
+        setBusy(button, true, "检索中");
+        $("searchMeta").textContent = "检索中";
+        const data = await requestJson("/search", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        renderSearch(data);
+        await refreshHealth();
+      } catch (error) {
+        $("searchMeta").textContent = "检索失败";
+        showMessage(error.message);
+      } finally {
+        setBusy(button, false);
+      }
+    }
+
+    function setActiveTab(tab) {
+      state.activeTab = tab;
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.classList.toggle("active", button.dataset.tab === tab);
+      });
+      $("citationsPanel").classList.toggle("hidden", tab !== "citations");
+      $("retrievalPanel").classList.toggle("hidden", tab !== "retrieval");
+      $("rawPanel").classList.toggle("hidden", tab !== "raw");
+    }
+
+    $("refreshHealth").addEventListener("click", refreshHealth);
+    $("loadIndex").addEventListener("click", loadIndex);
+    $("askForm").addEventListener("submit", submitAsk);
+    $("searchForm").addEventListener("submit", submitSearch);
+    document.querySelectorAll(".tab-button").forEach((button) => {
+      button.addEventListener("click", () => setActiveTab(button.dataset.tab));
+    });
+
+    renderItems([], "citationsPanel", "提交问题后会显示引用。");
+    renderItems([], "retrievalPanel", "提交问题后会显示检索片段。");
+    $("rawPanel").textContent = "{}";
+    refreshHealth();
+  </script>
+</body>
+</html>
