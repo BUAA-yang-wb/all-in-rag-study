@@ -13,6 +13,22 @@ from .indexing import (
     CourseVectorIndex,
     build_or_load_vector_index,
 )
+from .retrieval import (
+    DEFAULT_RETRIEVAL_STRATEGY,
+    DEFAULT_RRF_K,
+    CourseRetriever,
+    RetrievalStrategy,
+    default_candidate_k,
+    get_course_retriever,
+)
+from .rerank import (
+    DEFAULT_RERANK_BATCH_SIZE,
+    DEFAULT_RERANK_DEVICE,
+    DEFAULT_RERANK_MODEL,
+    DEFAULT_RERANK_TOP_N,
+    RerankConfig,
+    rerank_results,
+)
 
 
 DEFAULT_LLM_MODEL = "deepseek-v4-pro"
@@ -26,10 +42,18 @@ class GenerationConfig:
 
     top_k: int = 5
     candidate_k: int | None = None
+    retrieval_strategy: RetrievalStrategy = DEFAULT_RETRIEVAL_STRATEGY
+    rrf_k: int = DEFAULT_RRF_K
     min_chunk_chars: int = 20
     max_context_chars: int = 6_000
     max_context_chars_per_source: int = 1_600
     preview_chars: int = 220
+    use_rerank: bool = False
+    rerank_top_n: int = DEFAULT_RERANK_TOP_N
+    rerank_model: str = DEFAULT_RERANK_MODEL
+    rerank_batch_size: int = DEFAULT_RERANK_BATCH_SIZE
+    rerank_device: str = DEFAULT_RERANK_DEVICE
+    rerank_local_files_only: bool = True
     use_parent_context: bool = True
     use_llm: bool = True
     llm_model: str = DEFAULT_LLM_MODEL
@@ -46,6 +70,7 @@ def answer_question(
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     config: GenerationConfig | None = None,
     vector_index: CourseVectorIndex | None = None,
+    retriever: CourseRetriever | None = None,
 ) -> dict[str, Any]:
     """Retrieve course contexts, generate an answer, and return citations."""
 
@@ -59,8 +84,36 @@ def answer_question(
         show_progress_bar=False,
     )
 
-    candidate_k = selected_config.candidate_k or max(selected_config.top_k * 3, 12)
-    raw_results = active_index.search(question, top_k=candidate_k)
+    active_retriever = retriever or get_course_retriever(active_index)
+    candidate_k = selected_config.candidate_k or default_candidate_k(selected_config.top_k)
+    raw_results = active_retriever.search(
+        question,
+        strategy=selected_config.retrieval_strategy,
+        top_k=candidate_k,
+        rrf_k=selected_config.rrf_k,
+    )
+    rerank_error: str | None = None
+    rerank_used = False
+    rerank_model: str | None = None
+    rerank_device: str | None = None
+    if selected_config.use_rerank and raw_results:
+        rerank_outcome = rerank_results(
+            question,
+            raw_results,
+            config=RerankConfig(
+                model_name=selected_config.rerank_model,
+                top_n=selected_config.rerank_top_n,
+                batch_size=selected_config.rerank_batch_size,
+                device=selected_config.rerank_device,
+                local_files_only=selected_config.rerank_local_files_only,
+            ),
+        )
+        raw_results = rerank_outcome.results
+        rerank_error = rerank_outcome.error
+        rerank_used = rerank_outcome.used
+        rerank_model = rerank_outcome.model_name
+        rerank_device = rerank_outcome.device
+
     contexts = select_contexts(
         active_index,
         raw_results,
@@ -103,10 +156,22 @@ def answer_question(
         ],
         "used_llm": used_llm,
         "llm_error": llm_error,
+        "retrieval_strategy": selected_config.retrieval_strategy,
+        "retrievers": retrievers_for_strategy(selected_config.retrieval_strategy),
+        "use_rerank": selected_config.use_rerank,
+        "rerank_used": rerank_used,
+        "rerank_model": rerank_model or selected_config.rerank_model,
+        "rerank_device": rerank_device or selected_config.rerank_device,
+        "rerank_error": rerank_error,
         "pipeline": [
             "load_vector_index",
-            "encode_query",
-            "faiss_top_k_search",
+            *retrieval_pipeline_steps(selected_config.retrieval_strategy),
+            *rerank_pipeline_steps(
+                use_rerank=selected_config.use_rerank,
+                rerank_used=rerank_used,
+                rerank_error=rerank_error,
+                had_results=bool(raw_results),
+            ),
             "filter_short_chunks",
             "deduplicate_by_parent",
             "assemble_context",
@@ -241,6 +306,18 @@ def build_citation(
         "chunk_id": chunk_metadata.get("chunk_id"),
         "parent_doc_id": chunk_metadata.get("parent_doc_id"),
         "chunk_preview": preview_text(chunk_text, max_chars=preview_chars),
+        "retrieval_strategy": result.get("retrieval_strategy"),
+        "retrievers": result.get("retrievers") or [],
+        "dense_rank": result.get("dense_rank"),
+        "dense_score": round_optional(result.get("dense_score"), digits=4),
+        "bm25_rank": result.get("bm25_rank"),
+        "bm25_score": round_optional(result.get("bm25_score"), digits=4),
+        "rrf_score": round_optional(result.get("rrf_score"), digits=6),
+        "pre_rerank_rank": result.get("pre_rerank_rank"),
+        "pre_rerank_score": round_optional(result.get("pre_rerank_score"), digits=4),
+        "rerank_rank": result.get("rerank_rank"),
+        "rerank_score": round_optional(result.get("rerank_score"), digits=4),
+        "rerank_model": result.get("rerank_model"),
     }
 
 
@@ -380,6 +457,49 @@ def preview_text(text: str, *, max_chars: int = 220) -> str:
 
 def visible_text_len(text: str) -> int:
     return len("".join(str(text).split()))
+
+
+def retrieval_pipeline_steps(strategy: RetrievalStrategy) -> list[str]:
+    if strategy == "dense":
+        return ["encode_query", "faiss_candidate_search"]
+    if strategy == "bm25":
+        return ["bm25_tokenize_query", "bm25_candidate_search"]
+    return [
+        "encode_query",
+        "faiss_candidate_search",
+        "bm25_candidate_search",
+        "rrf_fusion",
+    ]
+
+
+def rerank_pipeline_steps(
+    *,
+    use_rerank: bool,
+    rerank_used: bool,
+    rerank_error: str | None,
+    had_results: bool,
+) -> list[str]:
+    if not use_rerank or not had_results:
+        return []
+    if rerank_used:
+        return ["rerank_candidates"]
+    if rerank_error:
+        return ["rerank_failed_fallback"]
+    return []
+
+
+def retrievers_for_strategy(strategy: RetrievalStrategy) -> list[str]:
+    if strategy == "dense":
+        return ["dense"]
+    if strategy == "bm25":
+        return ["bm25"]
+    return ["dense", "bm25"]
+
+
+def round_optional(value: Any, *, digits: int) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), digits)
 
 
 def load_dotenv_if_available() -> None:
