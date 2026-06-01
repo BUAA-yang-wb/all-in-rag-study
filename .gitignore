@@ -78,3 +78,7 @@ my_docs/api_key.txt
 my_docs/RAG项目学习背景说明.md
 course_rag/data
 course_rag/vector_index/
+
+# Course RAG evaluation generated artifacts
+course_rag/eval/eval_dataset.jsonl
+course_rag/eval/results/

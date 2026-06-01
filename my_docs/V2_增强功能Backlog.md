@@ -1,283 +1,163 @@
 # V2 增强功能 Backlog
 
-## 目标架构
+本文档只记录 V2 阶段的方向性规划：哪些资料格式需要处理，以及为了提升整体 RAG 效果，推荐怎样调整架构、策略和模型。不作为立即实现清单。
 
-V2 的目标不是只把图片 OCR 后塞进文本库，也不是一开始完全改成纯多模态检索，而是采用“文本证据 + 视觉证据”的混合 RAG：
+## 当前状态
+
+当前 `course_rag` 已完成文本 RAG 主流程：
+
+```text
+LoadedDocument
+-> ParentDocument / ChunkedDocument
+-> bge-small-zh-v1.5 + FAISS
+-> BM25 hybrid + RRF
+-> 可选 bge-reranker-base
+-> FastAPI /ask /search
+```
+
+当前索引主要覆盖 `priority=mvp` 的文本资料。manifest 中还有大量 V2 资料未充分进入 RAG：
+
+- `priority=mvp`：71 个资料，已进入当前文本索引。
+- `priority=v2`：192 个资料，其中 177 个是图片类 `docling_image`。
+- 需要重点补齐：图片、截图、低文本 PDF、扫描页、表格、页面布局和试卷类资料。
+
+## V2 推荐目标架构
+
+V2 不应只在现有框架上做小修小补，也不应只把图片 OCR 后当普通文本塞进库。更合理的目标是“文本证据 + 视觉证据 + 表格证据”的混合 RAG：
 
 ```text
 原始课程资料
--> 文档解析与证据抽取
+-> 解析与证据抽取
 -> EvidenceDocument 统一证据层
--> 文本 chunk / 视觉单元
--> 文本向量 + 稀疏向量 + 视觉向量
--> 混合检索 + 重排
--> 文本/多模态生成
--> 带 source/page/asset_path 的答案引用
+-> 文本证据 / 表格证据 / 视觉证据
+-> 文本索引 + 视觉索引
+-> 查询路由 + 混合检索 + rerank
+-> 文本生成 / 多模态生成
+-> 可追溯引用：source / page / section / asset_path / evidence_id
 ```
 
-这条路线更适合课程资料：PDF 和 Markdown 里既有大量文字，也有截图、图示、表格、页面布局。纯文本 RAG 会丢视觉信息；纯视觉 RAG 成本高、调试难，也不适合所有文字密集资料。
+核心调整：
 
-## 1. 加载与解析策略
+- 增加 `EvidenceDocument`，放在 loader 和 chunk/index 之间。
+- 图片、页面截图、扫描页不能只做 OCR；OCR 只能读出文字，不能稳定理解流程图、结构图、布局关系和图表含义。
+- 视觉资料应同时生成 OCR 文本、VLM 语义描述，并保留原图/页图用于视觉检索或多模态生成。
+- V2 最终推荐用 Milvus 作为向量数据库；FAISS 只作为当前 baseline 和文本-only fallback。
 
-### 文本型资料
+## 文件格式处理策略
 
-- Markdown：继续原生读取，保留标题层级，同时提取 `image_refs`。
-- 文本层 PDF：继续用 pypdf 按页抽取，保留页码。
-- DOCX/PPTX/复杂 PDF：使用 Docling 解析成 Markdown/JSON。
+| 资料类型 | V2 处理策略 | 推荐技术 |
+| --- | --- | --- |
+| Markdown | 原生读取正文；保留标题层级；提取 `image_refs`，把图片与所在章节上下文绑定。 | 当前 native loader + EvidenceDocument |
+| 文本层 PDF | 按页抽取正文；页作为 parent；保留 page citation。 | `pypdf` + 现有 parent-child chunk |
+| 低文本/扫描 PDF | 页级检测；低文本页渲染为图片；同时做 OCR、VLM 页面描述、表格/布局抽取。 | Docling / PaddleOCR / Qwen2.5-VL |
+| PPTX / 复杂课件 | 优先保留页面结构；必要时按页渲染成图片，再走页面级 OCR + VLM。 | Docling + 页面渲染 + VLM |
+| DOCX | 正文直接解析；表格单独抽取；图片作为 image evidence。 | Docling 或现有 docx fallback |
+| PNG/JPG 截图 | 作为一等视觉证据，不直接切普通文本；生成 OCR 文本、VLM caption，并保存 `asset_path`。 | PaddleOCR + Qwen2.5-VL |
+| 表格 | 单独形成 table evidence；小表整表入库，大表按行组切分但保留表头。 | Docling table structure / VLM 表格理解 |
+| 图示/流程图/状态图 | 不依赖 OCR；必须用 VLM 生成结构化说明，必要时进入视觉索引。 | Qwen2.5-VL + ColPali/ColQwen |
 
-### 少文本 PDF 页
+## EvidenceDocument 设计
 
-少文本页不要直接整份 PDF 重跑 Docling。推荐做页级增强：
-
-```text
-pypdf page text
--> page quality detector
--> low_text_page / image_heavy_page / table_like_page
--> 只增强命中的页
-```
-
-增强方式：
-
-- `low_text_page`：渲染该页为图片，做 OCR。
-- `image_heavy_page`：生成页面图片，做 VLM caption 或视觉索引。
-- `table_like_page`：优先 Docling table structure，输出 Markdown table。
-- Docling 用于结构、表格、布局和必要 OCR，不把它当成“万能图像理解器”。
-
-### Markdown 内嵌图片和独立图片
-
-每张图片至少生成两类证据：
-
-- OCR 文本：解决截图、扫描文字、公式旁文字。
-- 图片说明：用 VLM caption 描述图示关系、流程、状态转换、图表含义。
-
-图片证据必须继承上下文：
-
-```text
-原 md source
-所在标题 section_path
-图片路径 asset_path
-图片前后短文本
-```
-
-## 2. EvidenceDocument 统一证据层
-
-V2 建议在 `LoadedDocument` 和 `ChunkedDocument` 中间增加统一证据层。字段建议：
+统一证据层建议字段：
 
 ```text
 evidence_id
-source
-page
-asset_path
-course
-category
+source / source_name
+course / category
+page / section_path / asset_path
 modality: text | pdf_page | image | table
 evidence_kind: native_text | ocr_text | caption | layout_text | table_markdown
-parser_backend: pypdf | docling | ocr | vlm_caption
+parser_backend
 page_content
-context_before
-context_after
-pipeline_version
-source_hash
+context_before / context_after
+source_hash / pipeline_version
 ```
 
-这样后续无论来自 PDF 正文、截图 OCR、图像 caption、表格 Markdown，都可以统一进入 chunk、索引、检索和答案引用。
+用途：
 
-## 3. Chunk 策略
+- 文本、图片、表格、页面都先变成统一 evidence，再决定如何 chunk 和索引。
+- citation 可以直接追溯到原文件、页码、章节或图片路径。
+- 后续切换索引后端或模型时，不需要重写 loader 的核心语义。
 
-### 文本 chunk
+## 模型与索引策略
 
-- 普通文本：继续 parent-child chunk。
-- PDF：parent 以页为主，child 约 400-600 中文字符，保留页码。
-- Markdown：parent 以标题章节为主，child 约 400-600 字符。
+### 文本索引
 
-### 图片和少文本页 chunk
+V2 如果追求更好的整体效果，推荐把文本索引升级方向定为 `BAAI/bge-m3`：
 
-图片不要直接按普通正文切。建议一个图片形成一个 parent：
+- 比当前 `bge-small-zh-v1.5` 更适合中英混合、长文本和多粒度检索。
+- 支持 dense、sparse、multi-vector 思路，适合后续统一语义召回和关键词召回。
+- 当前 `BM25 + bge-small + RRF` 可作为过渡方案，不必立刻删除。
+
+rerank 可继续用当前 `BAAI/bge-reranker-base`；如果本地资源允许，再考虑更强 reranker。
+
+### OCR 与视觉理解
+
+图片处理不能停在 OCR：
+
+- OCR：提取图片或扫描页中的可见文字，推荐本地优先使用 PaddleOCR / PP-OCRv5。
+- VLM caption：理解图片含义、流程关系、图表趋势、页面布局，推荐本地优先尝试 Qwen2.5-VL 3B/7B。
+- 视觉检索：对页面图、截图、流程图等建立视觉向量，候选方向是 ColPali / ColQwen。
+
+推荐组合：
 
 ```text
-[图片上下文]
-[OCR 文本]
-[VLM 图片说明]
-[可选：相关 Markdown 标题路径]
+OCR 文本 -> 文本索引，解决“图片里写了什么”
+VLM caption -> 文本索引，解决“图片表达了什么”
+原图/页图 -> 视觉索引，解决“哪张图最相关”
 ```
 
-如果内容很短，不再切 child；如果 OCR 很长，再按段落切 child，但所有 child 指向同一个图片 parent。
+### 向量数据库
 
-### 表格 chunk
+V2 最终推荐迁移到 Milvus，而不是继续只靠 FAISS：
 
-表格不要简单打散成碎片。建议：
+- 支持向量检索和标量字段过滤，适合按课程、文件类型、页码、modality、evidence_kind 过滤。
+- 支持 dense / sparse / multi-vector hybrid search，适合后续文本证据、稀疏关键词证据和视觉证据统一检索。
+- Docker Compose standalone 部署方式更贴近真实工程项目，也更适合写进简历。
+- 相比 FAISS，Milvus 更适合服务化、增量数据管理和后续多模态扩展。
 
-- 小表格：整表作为一个 parent。
-- 大表格：按行组或逻辑分区切，保留表头。
-- 同时保存 `table_markdown` 和原始页码/图片路径。
-
-## 4. Embedding 策略
-
-### 文本检索模型
-
-V2 推荐把默认文本 embedding 升级为 `BAAI/bge-m3`，原因：
-
-- 支持中文/英文混合课程资料。
-- 支持 dense、sparse、multi-vector 三类检索能力。
-- 1024 维，最长 8192 tokens，适合较长页面和章节。
-
-`Qwen/Qwen3-Embedding-0.6B` 作为对比候选：它支持 100+ 语言、32K 上下文、最高 1024 维，并支持 instruction-aware 查询。它更适合后续做效果对比，但本地推理成本通常高于 bge-m3。
-
-### 视觉检索模型
-
-对于图片、页面截图、视觉布局强的 PDF 页，建议单独建立视觉索引。候选路线：
-
-- ColPali / ColQwen 类页面图像检索模型：适合直接把 PDF 页或图片作为视觉文档检索。
-- OCR/caption 文本索引：作为低成本、可解释的文本证据。
-
-最终推荐不是二选一，而是：
+建议迁移节奏：
 
 ```text
-OCR/caption/table text -> bge-m3 text index
-PDF page image / markdown image -> visual index
+先保持 FAISS 跑通文本化 evidence
+-> Docker Compose 部署 Milvus standalone
+-> 建立 Milvus evidence collection
+-> 文本向量迁移到 Milvus
+-> 再加入 sparse / visual_page 等多向量检索能力
 ```
 
-视觉索引用来召回“图像本身”，文本索引用来召回“图像的文字化解释”。两者互补。
+## 检索与生成策略
 
-## 5. 向量数据库策略
+查询时先做轻量 query routing：
 
-如果 V2 只做文本化证据，FAISS 还能继续用。但如果目标是完整支持图片、页面、多向量、metadata filter，最终建议迁移到 Qdrant。
+- 概念/定义类：走文本 dense + sparse/BM25 + rerank。
+- 文件名、页码、题号、术语：提高关键词和 metadata 权重。
+- 图片、截图、流程图、状态图、表格、页面类问题：同时召回 text evidence 和 visual evidence。
 
-推荐 Qdrant collection 设计：
+生成阶段按证据类型选择模型：
 
-```text
-collection: course_rag_evidence
-
-payload:
-  evidence_id
-  source
-  page
-  asset_path
-  course
-  category
-  modality
-  evidence_kind
-  parser_backend
-  parent_doc_id
-  text
-  pipeline_version
-  embedding_model_versions
-
-vectors:
-  text_dense       # bge-m3 dense
-  text_sparse      # bge-m3 sparse，可选
-  visual_page      # ColPali/ColQwen multivector 或其他视觉向量
-```
-
-选择 Qdrant 的原因：
-
-- 支持 payload 过滤，适合按课程、页码、资料类型、证据类型过滤。
-- 支持 named vectors，可在同一证据点挂 text/image 等不同向量。
-- 支持 multivectors，适合 ColBERT/ColPali 这类 late interaction 检索。
-- 比 FAISS 更适合增量添加、删除、更新和服务化调用。
-
-Milvus 暂不作为首选：它适合更大规模和分布式场景，目前项目规模用 Qdrant 更轻。
-
-## 6. 检索策略
-
-查询时不要只做一次向量搜索。建议流程：
-
-```text
-用户问题
--> query analysis
--> 文本 dense 检索
--> 稀疏/关键词检索
--> 视觉检索（当问题涉及图、截图、表、页面、流程关系时启用）
--> metadata filter
--> merge
--> rerank
--> context pack
-```
-
-具体规则：
-
-- 普通概念问题：文本 dense + sparse。
-- 精确术语、题号、文件名：提高 sparse/keyword 权重。
-- “图中”“截图”“流程图”“状态转换图”“第几页”等问题：启用视觉检索。
-- 表格问题：优先检索 `table_markdown`，必要时附原页面图片。
-- 检索结果按 parent/evidence 合并，避免同一页多个重复 chunk 挤占 Top-K。
-
-重排策略：
-
-- 第一阶段：向量召回 Top 30-50。
-- 第二阶段：文本 reranker 重排文本证据。
-- 第三阶段：如果有视觉证据，让生成模型或 VLM 判断是否需要附图。
-
-## 7. 生成策略
-
-生成阶段按证据类型选择输入：
-
-### 纯文本答案
-
-输入：
-
-```text
-Top text parents
-OCR/caption/table markdown
-source/page/section metadata
-```
-
-输出要求：
-
-- 引用来源。
-- 明确页码或图片路径。
-- 不确定时说明证据不足。
-
-### 视觉相关答案
-
-如果检索结果包含 `modality=image` 或 `modality=pdf_page`，生成阶段应把原图或页面截图一起传给多模态模型，而不是只传 caption。
-
-输入：
-
-```text
-问题
-文本证据
-OCR/caption
-原始图片或 PDF 页截图
-metadata
-```
-
-原因：OCR/caption 可能遗漏箭头、结构关系、图表趋势、布局含义。真正需要解释图时，生成模型应能看到图。
-
-## 8. 评测指标
-
-V2 的技术选型必须用评测决定，建议分三类问题：
-
-- 文本问题：概念、定义、知识点。
-- 表格/页面问题：页码、题目、表格字段。
-- 视觉问题：截图、流程图、状态图、图示关系。
-
-核心指标：
-
-- retrieval recall@k
-- MRR / nDCG
-- answer faithfulness
-- citation accuracy
-- visual evidence hit rate
-- 构建耗时、查询耗时、索引大小
+- 纯文本问题：继续走文本 LLM，使用 `[1] [2]` 引用。
+- 命中 OCR/caption/table evidence：用文本 LLM 回答，但 citation 必须包含 evidence 类型。
+- 命中图片或 PDF 页图：如果本地 VLM 可用，应把原图/页图一起传入，而不是只传 caption。
+- 回答中必须能追溯到 `source + page` 或 `asset_path`。
 
 ## 近期实施顺序
 
-1. 实现 EvidenceDocument 输出格式。
-2. 做 PDF page quality detector。
-3. 接入 Markdown 图片 OCR/caption。
-4. 接入少文本 PDF 页 OCR/Docling 增强。
-5. 用 bge-m3 重建 text index，并加入 sparse/keyword 检索。
-6. 用 Qdrant 试验 payload filter 和 named vectors。
-7. 对视觉问题试验 ColPali/ColQwen 页面检索。
-8. 让生成阶段支持“文本证据 + 原图/页图”输入。
+1. 定义 `EvidenceDocument`，统一文本、图片、页面、表格证据。
+2. 让现有文本 PDF/Markdown/DOCX 先经过 evidence 层，保持现有行为兼容。
+3. 接入图片 evidence：`image_refs`、独立 PNG/JPG、截图，保留上下文和 `asset_path`。
+4. 接入本地 OCR，优先处理截图、扫描页、低文本 PDF。
+5. 接入 VLM caption，优先处理流程图、状态图、图表和页面布局。
+6. 增加 table evidence，保留表头、页码和原始页面路径。
+7. 扩展 citation，加入 `evidence_id`、`modality`、`evidence_kind`、`asset_path`。
+8. 规划 Milvus evidence collection，并逐步迁移文本向量和视觉向量。
+9. 试验 ColPali/ColQwen 页面图检索，用于视觉问题召回。
 
-## 参考资料
+## 候选参考
 
-- ColPali: https://arxiv.org/abs/2407.01449
-- VisRAG: https://arxiv.org/abs/2410.10594
+- PaddleOCR / PP-OCRv5: https://paddlepaddle.github.io/PaddleOCR/
+- Qwen2.5-VL: https://qwenlm.github.io/blog/qwen2.5-vl/
 - BGE-M3: https://huggingface.co/BAAI/bge-m3
-- Qwen3-Embedding-0.6B: https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
-- Docling supported formats: https://docling-project.github.io/docling/usage/supported_formats/
-- Docling pipeline options: https://docling-project.github.io/docling/reference/pipeline_options/
-- Qdrant vectors: https://qdrant.tech/documentation/manage-data/vectors/
+- ColPali / ColQwen: https://huggingface.co/docs/transformers/en/model_doc/colpali
+- Milvus multi-vector hybrid search: https://milvus.io/docs/multi-vector-search.md
+- Milvus Docker Compose: https://milvus.io/docs/install_standalone-docker-compose.md

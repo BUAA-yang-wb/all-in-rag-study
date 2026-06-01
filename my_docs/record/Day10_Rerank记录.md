@@ -79,6 +79,16 @@ course_rag/data/processed/model_cache/huggingface/
 
 比较准确的项目表述是：
 
-> 在 BM25 + dense hybrid 检索和 RRF 融合之后，接入可选 Cross-Encoder reranker，对候选 chunk 进行二阶段精排，并保留 rerank 前后排序调试字段。
+> 在 BM25 + dense hybrid 检索和 RRF 融合之后，接入默认开启、可配置关闭的 Cross-Encoder reranker，对候选 chunk 进行二阶段精排，并保留 rerank 前后排序调试字段。
 
 后续如果要继续优化，优先做评测集和指标对比，而不是继续换更大的 rerank 模型。
+
+## 2026-06-01 默认行为调整
+
+根据 Day11 评测结果，当前文本 RAG 的默认问答和检索调试流程改为启用 rerank：
+
+- `GenerationConfig.use_rerank=true`
+- `/ask` 和 `/search` 请求 schema 的 `use_rerank` 默认值为 `true`
+- 前端问答和检索调试表单默认勾选 `Rerank 精排`
+
+如果后续需要对比基线或降低本地推理开销，仍然可以显式传入 `use_rerank=false`。

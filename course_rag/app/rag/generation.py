@@ -48,7 +48,7 @@ class GenerationConfig:
     max_context_chars: int = 6_000
     max_context_chars_per_source: int = 1_600
     preview_chars: int = 220
-    use_rerank: bool = False
+    use_rerank: bool = True
     rerank_top_n: int = DEFAULT_RERANK_TOP_N
     rerank_model: str = DEFAULT_RERANK_MODEL
     rerank_batch_size: int = DEFAULT_RERANK_BATCH_SIZE

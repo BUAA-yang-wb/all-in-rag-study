@@ -1,6 +1,6 @@
 # Course RAG 工作流
 
-最后更新：2026-05-30
+最后更新：2026-06-01
 
 本文档记录 `course_rag` 当前 RAG 系统从用户输入问题到返回答案的主流程。后续改进检索、rerank、生成或接口时，需要同步更新本文档。
 
@@ -55,7 +55,7 @@
 -> 请求参数解析
 -> 加载本地索引
 -> 混合检索召回候选
--> 可选 rerank 精排
+-> 默认 rerank 精排（可关闭）
 -> 短 chunk 过滤
 -> parent 去重
 -> 父文档上下文组装
@@ -77,7 +77,7 @@
 | `candidate_k` | 空 | 检索候选数量；为空时由系统计算 |
 | `strategy` | `hybrid` | 检索策略，可选 `hybrid`、`dense`、`bm25` |
 | `rrf_k` | 60 | RRF 融合参数 |
-| `use_rerank` | `false` | 是否启用 cross-encoder rerank |
+| `use_rerank` | `true` | 是否启用 cross-encoder rerank；默认开启 |
 | `rerank_top_n` | 20 | 送入 reranker 的候选数量 |
 | `rerank_model` | `BAAI/bge-reranker-base` | 默认 reranker 模型 |
 | `rerank_device` | `auto` | 自动选择 CUDA 或 CPU |
@@ -111,7 +111,7 @@
 dense 检索
 + BM25 检索
 -> RRF 融合
--> 可选 rerank
+-> 默认 rerank
 -> 候选结果排序
 ```
 
@@ -149,11 +149,11 @@ score = sum(1 / (rrf_k + rank))
 - `bm25_score`
 - `rrf_score`
 
-### 可选 Rerank 精排
+### 默认 Rerank 精排
 
-rerank 模块位于 `course_rag/app/rag/rerank.py`，当前默认关闭。
+rerank 模块位于 `course_rag/app/rag/rerank.py`，当前默认开启，可通过 `use_rerank=false` 关闭。
 
-启用后流程为：
+启用时流程为：
 
 ```text
 RRF 候选结果
@@ -267,7 +267,7 @@ load_vector_index
 -> faiss_candidate_search
 -> bm25_candidate_search
 -> rrf_fusion
--> rerank_candidates（use_rerank=true 时）
+-> rerank_candidates（默认开启；use_rerank=false 时跳过）
 -> filter_short_chunks
 -> deduplicate_by_parent
 -> assemble_context
