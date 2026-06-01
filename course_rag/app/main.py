@@ -33,6 +33,7 @@ from .schemas import (
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+FRONTEND_DIST_DIR = STATIC_DIR / "frontend"
 
 app = FastAPI(
     title="Course RAG API",
@@ -47,9 +48,15 @@ _vector_index: CourseVectorIndex | None = None
 
 @app.get("/", include_in_schema=False)
 def frontend() -> FileResponse:
-    """Serve the lightweight RAG demo page."""
+    """Serve the built Vue RAG workspace."""
 
-    return FileResponse(STATIC_DIR / "index.html")
+    index_file = FRONTEND_DIST_DIR / "index.html"
+    if not index_file.exists():
+        raise HTTPException(
+            status_code=503,
+            detail="Frontend build is missing. Run `npm run build` in course_rag/frontend.",
+        )
+    return FileResponse(index_file)
 
 
 @app.get("/health", response_model=HealthResponse)
