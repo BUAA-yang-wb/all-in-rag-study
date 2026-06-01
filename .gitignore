@@ -25,6 +25,11 @@ venv/
 .venv/
 ENV/
 
+# Frontend dependencies
+node_modules/
+course_rag/frontend/node_modules/
+course_rag/frontend/.vite/
+
 # IDE
 .idea/
 .vscode/
@@ -82,3 +87,5 @@ course_rag/vector_index/
 # Course RAG evaluation generated artifacts
 course_rag/eval/eval_dataset.jsonl
 course_rag/eval/results/
+
+course_rag/app/static/frontend

@@ -1,0 +1,143 @@
+.app-shell {
+  display: grid;
+  gap: 22px;
+  width: min(var(--max-width), calc(100% - 36px));
+  margin: 0 auto;
+  padding: 28px 0 46px;
+}
+
+.app-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 20px;
+  align-items: end;
+  padding: 6px 0 2px;
+}
+
+.brand-block {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--spruce);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.86), rgba(247, 234, 216, 0.92)),
+    var(--paper);
+  box-shadow: var(--shadow-tight);
+}
+
+.eyebrow {
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.app-header h1 {
+  margin-top: 2px;
+  font-size: 36px;
+  line-height: 1.12;
+}
+
+.header-copy {
+  max-width: 720px;
+  margin-top: 8px;
+  color: var(--ink-soft);
+  font-size: 15px;
+}
+
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.92fr) minmax(0, 1.42fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.debug-section {
+  display: grid;
+  grid-template-columns: minmax(340px, 0.82fr) minmax(0, 1.18fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.field-grid--compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.field--wide {
+  grid-column: span 2;
+}
+
+@media (max-width: 1040px) {
+  .app-header,
+  .workspace-grid,
+  .debug-section {
+    grid-template-columns: 1fr;
+  }
+
+  .header-actions {
+    justify-content: flex-start;
+  }
+
+  .status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    width: min(100% - 24px, var(--max-width));
+    padding-top: 18px;
+  }
+
+  .brand-block {
+    grid-template-columns: 1fr;
+  }
+
+  .brand-mark {
+    width: 48px;
+    height: 48px;
+  }
+
+  .app-header h1 {
+    font-size: 30px;
+  }
+
+  .status-grid,
+  .field-grid,
+  .field-grid--compact {
+    grid-template-columns: 1fr;
+  }
+
+  .field--wide {
+    grid-column: auto;
+  }
+}
