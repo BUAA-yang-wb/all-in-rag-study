@@ -479,6 +479,7 @@
         </div>
         <div class="check-row">
           <label><input id="askUseLlm" type="checkbox" checked> 使用 LLM</label>
+          <label><input id="askUseRerank" type="checkbox" checked> Rerank 精排</label>
           <label><input id="askUseParent" type="checkbox" checked> 父文档上下文</label>
         </div>
         <div class="actions">
@@ -530,6 +531,7 @@
           </label>
         </div>
         <div class="check-row">
+          <label><input id="searchUseRerank" type="checkbox" checked> Rerank 精排</label>
           <label><input id="searchUseParent" type="checkbox" checked> 父文档上下文</label>
         </div>
         <div class="actions">
@@ -737,6 +739,7 @@
         question,
         top_k: Number($("askTopK").value || 5),
         use_llm: $("askUseLlm").checked,
+        use_rerank: $("askUseRerank").checked,
         use_parent_context: $("askUseParent").checked,
       };
       if (candidateK !== null) payload.candidate_k = candidateK;
@@ -779,6 +782,7 @@
       const payload = {
         query,
         top_k: Number($("searchTopK").value || 5),
+        use_rerank: $("searchUseRerank").checked,
         use_parent_context: $("searchUseParent").checked,
       };
       if (candidateK !== null) payload.candidate_k = candidateK;

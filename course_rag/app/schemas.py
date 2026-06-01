@@ -55,7 +55,7 @@ class AskRequest(BaseModel):
     candidate_k: int | None = Field(default=None, ge=1, le=100)
     strategy: RetrievalStrategy = "hybrid"
     rrf_k: int = Field(default=60, ge=1, le=200)
-    use_rerank: bool = False
+    use_rerank: bool = True
     rerank_top_n: int = Field(default=20, ge=1, le=100)
     rerank_model: str = "BAAI/bge-reranker-base"
     rerank_batch_size: int = Field(default=8, ge=1, le=32)
@@ -80,7 +80,7 @@ class AskResponse(BaseModel):
     llm_error: str | None = None
     retrieval_strategy: str = "hybrid"
     retrievers: list[str] = Field(default_factory=list)
-    use_rerank: bool = False
+    use_rerank: bool = True
     rerank_used: bool = False
     rerank_model: str | None = None
     rerank_device: str | None = None
@@ -95,7 +95,7 @@ class SearchRequest(BaseModel):
     candidate_k: int | None = Field(default=None, ge=1, le=100)
     strategy: RetrievalStrategy = "hybrid"
     rrf_k: int = Field(default=60, ge=1, le=200)
-    use_rerank: bool = False
+    use_rerank: bool = True
     rerank_top_n: int = Field(default=20, ge=1, le=100)
     rerank_model: str = "BAAI/bge-reranker-base"
     rerank_batch_size: int = Field(default=8, ge=1, le=32)
@@ -112,7 +112,7 @@ class SearchResponse(BaseModel):
     retrieval: list[RetrievalItem]
     strategy: str
     retrievers: list[str] = Field(default_factory=list)
-    use_rerank: bool = False
+    use_rerank: bool = True
     rerank_used: bool = False
     rerank_model: str | None = None
     rerank_device: str | None = None
