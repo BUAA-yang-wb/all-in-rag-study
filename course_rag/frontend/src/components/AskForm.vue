@@ -35,6 +35,13 @@ const form = reactive<AskFormState>({
   preview_chars: 220,
   temperature: 0.1,
   max_tokens: 1500,
+  use_metadata_routing: true,
+  course: "",
+  category: "",
+  source_name: "",
+  page: "",
+  modality: "",
+  evidence_kind: "",
 });
 
 function submitForm() {

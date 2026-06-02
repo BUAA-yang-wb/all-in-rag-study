@@ -1,6 +1,6 @@
 # Day11 文本 RAG 评测
 
-本目录用于对当前 `course_rag` 文本 RAG 主流程做离线评测。评测范围只覆盖当前 MVP 文本索引，不评价图片、扫描 PDF、表格、VLM caption 或 Milvus 等 V2 能力。
+本目录用于对当前 `course_rag` 文本 RAG 主流程做离线评测。默认评测当前 V2 text evidence 文本索引，并启用 metadata routing；不评价图片、扫描 PDF、表格、VLM caption 或 Milvus 等后续 V2 能力。
 
 ## 运行
 
@@ -8,6 +8,12 @@
 
 ```powershell
 .\rag\Scripts\python.exe course_rag\eval\run_eval.py
+```
+
+默认索引目录：
+
+```text
+course_rag/vector_index_v2_text/
 ```
 
 快速验证：
@@ -57,9 +63,11 @@ course_rag/eval/eval_dataset.jsonl
 | `hybrid` | 5 | 30 | `hybrid` | no |
 | `hybrid-rerank` | 5 | 30 | `hybrid` | yes, `rerank_top_n=20` |
 
+默认 `GenerationConfig` 会启用 `use_metadata_routing=true`。如果问题文本中能高置信识别课程、文件或页码，评测结果 JSON 中会保留 `routing` 相关调试信息。
+
 ## 最新结果
 
-本次完整评测使用 30 条问题，结果如下：
+本次 routing 评测使用 30 条问题，结果如下：
 
 | 实验 | Questions | Recall@5 | MRR | Citation Hit Rate | Rerank Used | Rerank Errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -69,5 +77,5 @@ course_rag/eval/eval_dataset.jsonl
 
 完整结果写入：
 
-- `course_rag/eval/results/day11_text_rag_eval.json`
-- `course_rag/eval/results/day11_text_rag_eval.md`
+- `course_rag/eval/results/day14_routing_eval.json`
+- `course_rag/eval/results/day14_routing_eval.md`

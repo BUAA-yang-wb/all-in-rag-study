@@ -2,7 +2,7 @@
 
 最后更新：2026-06-02
 
-本文档记录 `course_rag` V2 阶段增强功能的实施计划，只作为后续执行依据。本次计划不实施任何 V2 功能，不修改现有 RAG 主流程。
+本文档记录 `course_rag` V2 阶段增强功能的实施计划和完成状态。阶段 1/2 已完成，当前默认进入 V2 text evidence 文本链路。
 
 ## 1. 当前状态
 
@@ -12,9 +12,11 @@
 
 ```text
 LoadedDocument
+-> EvidenceDocument(text/native_text)
 -> ParentDocument / ChunkedDocument
 -> BAAI/bge-small-zh-v1.5 + FAISS
 -> BM25 hybrid + RRF
+-> metadata routing + filter/boost
 -> 默认 bge-reranker-base rerank
 -> FastAPI /ask /search
 -> 前端问答与检索工作台
@@ -26,8 +28,10 @@ LoadedDocument
 - 父子 chunk：child chunk 用于检索，parent document 用于生成上下文。
 - 检索：dense、BM25、hybrid 三种策略，默认 hybrid。
 - 精排：默认开启 `BAAI/bge-reranker-base`。
+- routing：已支持课程、文件、页码、证据类型等可选过滤与调试返回。
 - API：`/ask`、`/search`、`/ingest`、`/health`。
 - 评测：已有 30 条文本 RAG 离线评测集。
+- V2 text evidence：已支持 `EvidenceDocument`、稳定 `evidence_id`、citation 扩展字段和默认 text evidence 索引。
 
 当前文本链路已经足够作为 V2 的稳定 baseline。V2 不应一开始就替换 embedding、迁移 Milvus 或重做所有模块，而应围绕当前真实缺口逐步增强。
 
@@ -43,7 +47,7 @@ LoadedDocument
 
 当前 `data_manifest_summary.json` 中，资料规模大致为：
 
-- `priority=mvp`：71 个资料，已进入当前文本索引。
+- `priority=mvp`：71 个资料，已进入当前 V2 text evidence 文本索引。
 - `priority=v2`：192 个资料，尚未充分进入有效 RAG。
 - `docling_image`：177 个，主要是图片、截图和图像型资料。
 - 低文本 PDF：21 个，需要页级 OCR 或视觉理解。
@@ -184,13 +188,13 @@ context_after
 
 ## 4. 分阶段实施顺序
 
-### 阶段 1：EvidenceDocument 与 citation 字段规划
+### 阶段 1：EvidenceDocument 与 citation 字段规划（已完成）
 
 目标：
 
 - 定义 V2 的统一证据对象和 citation 扩展字段。
 - 明确哪些字段必须稳定，哪些字段允许为空。
-- 不改变当前 `/ask`、`/search` 默认行为。
+- 保持 `/ask`、`/search` 返回结构向后兼容。
 
 主要改动点：
 
@@ -201,42 +205,42 @@ context_after
 
 验收标准：
 
-- 能把现有 MVP 文本资料转换为 text evidence。
-- 每条 evidence 有稳定 `evidence_id`。
-- citation 能保留旧字段，并可附加 evidence 字段。
-- 不影响现有文本检索评测。
+- 已能把现有 MVP 文本资料转换为 text evidence。
+- 已为每条 evidence 生成稳定 `evidence_id`。
+- citation 已保留旧字段，并附加 evidence 字段。
+- Day11 文本评测已验证无退化。
 
 风险：
 
 - 过早设计过复杂 schema 会拖慢后续实现。
 - `evidence_id` 如果依赖不稳定字段，会导致索引重建后引用难以对齐。
 
-### 阶段 2：现有文本链路兼容迁移到 evidence 层
+### 阶段 2：现有文本链路兼容迁移到 evidence 层（已完成）
 
 目标：
 
 - 让现有文本资料先经过 evidence 层，再进入 chunk/index。
-- 保持当前 MVP 行为兼容。
+- 已切换为当前默认文本链路。
 
 主要改动点：
 
 - Markdown、文本层 PDF、DOCX 的正文先转换为 text evidence。
 - 原有 parent-child chunk 策略继续保留。
 - `source`、`page`、`section_path` 等元数据从 evidence 透传到 chunk。
-- 索引目录建议先使用新目录做实验，避免破坏现有 `course_rag/vector_index/` baseline。
+- 默认索引目录已切换为 `course_rag/vector_index_v2_text/`。
 
 验收标准：
 
-- `/search` 和 `/ask` 在 `use_llm=false` 下能返回与当前链路等价的文本证据。
-- Day11 文本评测不明显退化。
-- 现有前端展示不崩溃。
+- `/search` 和 `/ask` 在 `use_llm=false` 下已能返回带 evidence 字段的文本证据。
+- Day11 文本评测已验证无退化。
+- 前端 evidence 列表已支持展示 evidence 调试字段。
 
 风险：
 
 - 元数据透传遗漏会影响 citation。
 - 兼容迁移阶段不应同时更换 embedding 或索引后端，否则难以定位回归来源。
 
-### 阶段 3：metadata routing 与课程/文件/页码过滤
+### 阶段 3：metadata routing 与课程/文件/页码过滤（已完成）
 
 目标：
 
@@ -246,15 +250,15 @@ context_after
 主要改动点：
 
 - 增加轻量 query routing，识别课程名、文件名、页码、题号、图片/表格意图。
-- API 后续可增加可选过滤字段：`course`、`category`、`source_name`、`page`、`modality`、`evidence_kind`。
-- 检索时对显式 metadata 命中的候选加权或过滤。
-- 记录 routing 调试信息，便于前端和评测分析。
+- API 已增加可选过滤字段：`course`、`category`、`source_name`、`page`、`modality`、`evidence_kind`。
+- 检索时对显式 metadata 命中的候选过滤，对自动识别条件支持失败回退。
+- 已记录 routing 调试信息，便于前端和评测分析。
 
 验收标准：
 
-- 指定课程或文件的问题不再大量跨课程混召回。
-- 指定页码或题号类问题能优先返回对应 source。
-- routing 失败时能回退到当前 hybrid 检索。
+- 指定课程或文件的问题已能限制到对应 metadata 范围。
+- 指定页码问题已能优先返回对应页码候选。
+- 自动 routing 失败时已能回退到当前 hybrid 检索。
 
 风险：
 
@@ -433,14 +437,14 @@ context_after
 
 近期建议优先做：
 
-1. `EvidenceDocument` 与 citation 字段规划。
-2. 现有文本链路兼容迁移到 evidence 层。
-3. metadata routing 与课程/文件/页码过滤。
-4. 图片 evidence 与 Markdown image_refs。
+1. `EvidenceDocument` 与 citation 字段规划。（已完成）
+2. 现有文本链路兼容迁移到 evidence 层，并切换为默认文本索引。（已完成）
+3. metadata routing 与课程/文件/页码过滤。（已完成）
+4. 图片 evidence 与 Markdown image_refs。（下一步）
 5. OCR 缓存化接入。
 6. 用已下载的 `Qwen3-VL-2B-Instruct-GGUF` 作为离线 caption 生成器做小样本验证。
 
-这样可以先扩大资料覆盖面，并保留当前文本 RAG 的稳定 baseline。
+这样可以先增强当前文本 evidence 的可控检索，再逐步扩大图片、OCR 和 VLM caption 的资料覆盖面。
 
 ## 6. 验证规则
 

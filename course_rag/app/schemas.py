@@ -14,6 +14,14 @@ class Citation(BaseModel):
     id: int
     rank: int | None = None
     score: float
+    evidence_id: str | None = None
+    source_doc_id: str | None = None
+    modality: str | None = None
+    evidence_kind: str | None = None
+    asset_path: str | None = None
+    parser_backend: str | None = None
+    context_before: str | None = None
+    context_after: str | None = None
     source: str | None = None
     source_name: str | None = None
     course: str | None = None
@@ -37,6 +45,12 @@ class Citation(BaseModel):
     rerank_rank: int | None = None
     rerank_score: float | None = None
     rerank_model: str | None = None
+    pre_routing_rank: int | None = None
+    pre_routing_score: float | None = None
+    metadata_filter_match: bool | None = None
+    metadata_boost: float | None = None
+    matched_filters: list[str] = Field(default_factory=list)
+    matched_intents: list[str] = Field(default_factory=list)
 
 
 class RetrievalItem(Citation):
@@ -69,6 +83,13 @@ class AskRequest(BaseModel):
     preview_chars: int = Field(default=220, ge=50, le=1000)
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_tokens: int = Field(default=1500, ge=128, le=4096)
+    use_metadata_routing: bool = True
+    course: str | None = None
+    category: str | None = None
+    source_name: str | None = None
+    page: int | str | None = None
+    modality: str | None = None
+    evidence_kind: str | None = None
 
 
 class AskResponse(BaseModel):
@@ -85,6 +106,7 @@ class AskResponse(BaseModel):
     rerank_model: str | None = None
     rerank_device: str | None = None
     rerank_error: str | None = None
+    routing: dict[str, Any] = Field(default_factory=dict)
     pipeline: list[str]
     index: IndexInfo
 
@@ -104,6 +126,13 @@ class SearchRequest(BaseModel):
     use_parent_context: bool = True
     min_chunk_chars: int = Field(default=20, ge=0)
     preview_chars: int = Field(default=220, ge=50, le=1000)
+    use_metadata_routing: bool = True
+    course: str | None = None
+    category: str | None = None
+    source_name: str | None = None
+    page: int | str | None = None
+    modality: str | None = None
+    evidence_kind: str | None = None
 
 
 class SearchResponse(BaseModel):
@@ -117,6 +146,7 @@ class SearchResponse(BaseModel):
     rerank_model: str | None = None
     rerank_device: str | None = None
     rerank_error: str | None = None
+    routing: dict[str, Any] = Field(default_factory=dict)
     top_k: int
     pipeline: list[str]
     index: IndexInfo

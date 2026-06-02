@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { FileText, GitBranch, Hash, MapPinned } from "lucide-vue-next";
+import { FileText, GitBranch, Hash, Layers, MapPinned } from "lucide-vue-next";
 
 import type { Citation } from "@/types/api";
 
@@ -36,6 +36,9 @@ function fixedScore(value: unknown): string {
 
 function diagnosticChips(item: Citation): string[] {
   const chips: string[] = [];
+  if (item.modality) chips.push(item.modality);
+  if (item.evidence_kind) chips.push(item.evidence_kind);
+  if (item.parser_backend) chips.push(item.parser_backend);
   if (item.retrieval_strategy) chips.push(item.retrieval_strategy);
   if (item.retrievers?.length) chips.push(item.retrievers.join("+"));
   if (item.rerank_score !== null && item.rerank_score !== undefined) {
@@ -43,6 +46,12 @@ function diagnosticChips(item: Citation): string[] {
   }
   if (item.rrf_score !== null && item.rrf_score !== undefined) {
     chips.push(`rrf ${fixedScore(item.rrf_score)}`);
+  }
+  if (item.metadata_boost && item.metadata_boost > 1) {
+    chips.push(`metadata x${fixedScore(item.metadata_boost)}`);
+  }
+  if (item.matched_filters?.length) {
+    chips.push(`filter ${item.matched_filters.join("+")}`);
   }
   return chips;
 }
@@ -74,6 +83,10 @@ function diagnosticChips(item: Citation): string[] {
       <p class="evidence-text">{{ previewText(item) }}</p>
 
       <div class="chip-row">
+        <span v-if="item.evidence_id" class="mini-chip">
+          <Layers :size="13" aria-hidden="true" />
+          {{ item.evidence_id }}
+        </span>
         <span v-if="item.chunk_id" class="mini-chip">
           <FileText :size="13" aria-hidden="true" />
           {{ item.chunk_id }}

@@ -23,6 +23,24 @@ const answerMeta = computed(() => {
   const pipeline = props.result.pipeline.join(" -> ");
   return `${refs} 条引用 / ${pipeline}`;
 });
+
+const routingText = computed(() => {
+  const routing = props.result?.routing;
+  if (!routing?.enabled || !routing.active) return "";
+  const filters = {
+    ...(routing.explicit_filters || {}),
+    ...(routing.inferred_filters || {}),
+  };
+  const filterText = Object.entries(filters)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" / ");
+  const status = routing.filter_fallback
+    ? "routing 回退"
+    : routing.filter_applied
+      ? "routing 过滤"
+      : "routing";
+  return [status, filterText].filter(Boolean).join(" / ");
+});
 </script>
 
 <template>
@@ -48,6 +66,9 @@ const answerMeta = computed(() => {
     </div>
     <div v-if="result?.rerank_error" class="notice notice--warning">
       Rerank 回退：{{ result.rerank_error }}
+    </div>
+    <div v-if="routingText" class="notice notice--info">
+      {{ routingText }}
     </div>
 
     <article class="answer-sheet" :class="{ 'answer-sheet--busy': busy }">

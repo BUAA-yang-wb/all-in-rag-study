@@ -1,6 +1,6 @@
 # Course RAG 工作流
 
-最后更新：2026-06-01
+最后更新：2026-06-02
 
 本文档记录 `course_rag` 当前 RAG 系统从用户输入问题到返回答案的主流程。后续改进检索、rerank、生成或接口时，需要同步更新本文档。
 
@@ -27,6 +27,7 @@
 课程资料
 -> 数据清单
 -> 文档加载
+-> V2 EvidenceDocument 证据层
 -> 父子 chunk 切分
 -> embedding 编码
 -> FAISS 索引保存
@@ -43,8 +44,42 @@
 | 向量维度 | 512 |
 | 向量索引 | FAISS `IndexFlatIP` |
 | 相似度策略 | embedding 归一化后使用 inner product，可按 cosine similarity 理解 |
-| 索引目录 | `course_rag/vector_index/` |
+| 索引目录 | `course_rag/vector_index_v2_text/` |
 | 元数据文件 | `chunks.jsonl`、`parents.jsonl`、`parent_child_map.json`、`index_meta.json` |
+
+### V2 Text Evidence 证据层
+
+V2 首批改动新增了 `course_rag/app/rag/evidence.py`，用于把现有 `LoadedDocument` 转换为统一的 `EvidenceDocument` 后再进入原有 chunk/index 流程。
+
+当前只启用文本证据：
+
+```text
+LoadedDocument
+-> EvidenceDocument(modality=text, evidence_kind=native_text)
+-> LoadedDocument 兼容形态
+-> ParentDocument / ChunkedDocument
+-> 当前 FAISS + hybrid + rerank 流程
+```
+
+当前默认索引目录为：
+
+```text
+course_rag/vector_index_v2_text/
+```
+
+默认重建会生成 text evidence；如需显式重建：
+
+```powershell
+.\rag\Scripts\python.exe course_rag\app\rag\indexing.py --rebuild
+```
+
+生成的 text evidence 缓存默认写入：
+
+```text
+course_rag/data/processed/evidence_text.jsonl
+```
+
+`evidence_id` 基于来源、页码、section、证据类型等稳定字段生成，不依赖 chunk 文本内容；chunk 和 parent 会透传 `evidence_id`、`source_doc_id`、`modality`、`evidence_kind`、`asset_path`、`parser_backend` 等字段。
 
 ## 在线问答流程
 
@@ -55,6 +90,7 @@
 -> 请求参数解析
 -> 加载本地索引
 -> 混合检索召回候选
+-> metadata routing 过滤或加权
 -> 默认 rerank 精排（可关闭）
 -> 短 chunk 过滤
 -> parent 去重
@@ -84,12 +120,16 @@
 | `rerank_local_files_only` | `true` | 默认只读本地缓存，避免自动下载模型 |
 | `use_parent_context` | `true` | 使用父文档作为生成上下文 |
 | `use_llm` | `true` | 是否调用 LLM |
+| `use_metadata_routing` | `true` | 是否启用课程、文件、页码等 metadata routing |
+| `course` / `category` | 空 | 可选显式过滤课程或资料类别 |
+| `source_name` / `page` | 空 | 可选显式过滤文件名或页码 |
+| `modality` / `evidence_kind` | 空 | 可选显式过滤 evidence 类型 |
 | `max_context_chars` | 6000 | prompt 上下文总长度上限 |
 | `max_context_chars_per_source` | 1600 | 单个来源上下文长度上限 |
 
 ## 2. 索引加载
 
-在线问答默认加载 `course_rag/vector_index/`。
+在线问答默认加载 `course_rag/vector_index_v2_text/`。
 
 加载内容：
 
@@ -148,6 +188,17 @@ score = sum(1 / (rrf_k + rank))
 - `bm25_rank`
 - `bm25_score`
 - `rrf_score`
+
+### Metadata Routing
+
+routing 模块位于 `course_rag/app/rag/routing.py`，默认在 `/ask` 和 `/search` 中启用。
+
+当前策略：
+
+- 显式请求字段 `course`、`category`、`source_name`、`page`、`modality`、`evidence_kind` 使用严格 metadata filter。
+- 问题文本中高置信识别出的课程名、文件名、页码和期末试题类别会先尝试过滤；如果过滤后没有候选，则回退到原始 hybrid 候选。
+- 图片、表格、题号类意图会记录到 `routing.intents`，当前 text evidence 索引只做调试和轻量加权，不强行过滤到图片或表格。
+- routing 会返回 `candidate_count_before`、`candidate_count_after`、`applied_filters`、`filter_fallback` 等调试信息。
 
 ### 默认 Rerank 精排
 
@@ -250,12 +301,24 @@ human:
 - `rerank_model`
 - `rerank_device`
 - `rerank_error`
+- `routing`
 - `pipeline`
 - `index`
 
 `citations` 用于答案引用展示。
 
 `retrieval` 用于调试检索命中、上下文内容和融合分数。
+
+V2 text evidence 索引会额外返回以下可选字段：
+
+- `evidence_id`
+- `source_doc_id`
+- `modality`
+- `evidence_kind`
+- `asset_path`
+- `parser_backend`
+- `context_before`
+- `context_after`
 
 ## 当前 Pipeline
 
@@ -267,6 +330,9 @@ load_vector_index
 -> faiss_candidate_search
 -> bm25_candidate_search
 -> rrf_fusion
+-> metadata_route_query
+-> metadata_filter_candidates / metadata_filter_fallback
+-> metadata_boost_candidates
 -> rerank_candidates（默认开启；use_rerank=false 时跳过）
 -> filter_short_chunks
 -> deduplicate_by_parent

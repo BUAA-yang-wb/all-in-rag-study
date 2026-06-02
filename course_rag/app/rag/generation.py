@@ -29,6 +29,12 @@ from .rerank import (
     RerankConfig,
     rerank_results,
 )
+from .routing import (
+    MetadataFilters,
+    apply_metadata_routing,
+    build_query_route,
+    build_routed_retrieval_query,
+)
 
 
 DEFAULT_LLM_MODEL = "deepseek-v4-pro"
@@ -61,6 +67,13 @@ class GenerationConfig:
     api_key_env: str = DEFAULT_API_KEY_ENV
     temperature: float = 0.1
     max_tokens: int = 1_500
+    use_metadata_routing: bool = True
+    course: str | None = None
+    category: str | None = None
+    source_name: str | None = None
+    page: int | str | None = None
+    modality: str | None = None
+    evidence_kind: str | None = None
 
 
 def answer_question(
@@ -86,12 +99,35 @@ def answer_question(
 
     active_retriever = retriever or get_course_retriever(active_index)
     candidate_k = selected_config.candidate_k or default_candidate_k(selected_config.top_k)
-    raw_results = active_retriever.search(
+    route = build_query_route(
         question,
+        active_index,
+        explicit_filters=MetadataFilters(
+            course=selected_config.course,
+            category=selected_config.category,
+            source_name=selected_config.source_name,
+            page=selected_config.page,
+            modality=selected_config.modality,
+            evidence_kind=selected_config.evidence_kind,
+        ),
+        enabled=selected_config.use_metadata_routing,
+    )
+    if (
+        selected_config.use_metadata_routing
+        and route.active
+        and selected_config.candidate_k is None
+    ):
+        candidate_k = min(len(active_index.chunks), max(candidate_k, 100))
+
+    retrieval_query = build_routed_retrieval_query(question, route)
+    raw_results = active_retriever.search(
+        retrieval_query,
         strategy=selected_config.retrieval_strategy,
         top_k=candidate_k,
         rrf_k=selected_config.rrf_k,
     )
+    raw_results, routing_debug = apply_metadata_routing(raw_results, route)
+    had_rerank_candidates = bool(raw_results)
     rerank_error: str | None = None
     rerank_used = False
     rerank_model: str | None = None
@@ -163,14 +199,16 @@ def answer_question(
         "rerank_model": rerank_model or selected_config.rerank_model,
         "rerank_device": rerank_device or selected_config.rerank_device,
         "rerank_error": rerank_error,
+        "routing": routing_debug,
         "pipeline": [
             "load_vector_index",
             *retrieval_pipeline_steps(selected_config.retrieval_strategy),
+            *metadata_routing_pipeline_steps(routing_debug),
             *rerank_pipeline_steps(
                 use_rerank=selected_config.use_rerank,
                 rerank_used=rerank_used,
                 rerank_error=rerank_error,
-                had_results=bool(raw_results),
+                had_results=had_rerank_candidates,
             ),
             "filter_short_chunks",
             "deduplicate_by_parent",
@@ -296,6 +334,14 @@ def build_citation(
         "id": citation_index,
         "rank": result.get("rank"),
         "score": round(float(result.get("score", 0.0)), 4),
+        "evidence_id": metadata_value("evidence_id", context_metadata, chunk_metadata),
+        "source_doc_id": metadata_value("source_doc_id", context_metadata, chunk_metadata),
+        "modality": metadata_value("modality", context_metadata, chunk_metadata),
+        "evidence_kind": metadata_value("evidence_kind", context_metadata, chunk_metadata),
+        "asset_path": metadata_value("asset_path", context_metadata, chunk_metadata),
+        "parser_backend": metadata_value("parser_backend", context_metadata, chunk_metadata),
+        "context_before": metadata_value("context_before", context_metadata, chunk_metadata),
+        "context_after": metadata_value("context_after", context_metadata, chunk_metadata),
         "source": source,
         "source_name": context_metadata.get("source_name") or chunk_metadata.get("source_name"),
         "course": context_metadata.get("course") or chunk_metadata.get("course"),
@@ -318,7 +364,21 @@ def build_citation(
         "rerank_rank": result.get("rerank_rank"),
         "rerank_score": round_optional(result.get("rerank_score"), digits=4),
         "rerank_model": result.get("rerank_model"),
+        "pre_routing_rank": result.get("pre_routing_rank"),
+        "pre_routing_score": round_optional(result.get("pre_routing_score"), digits=4),
+        "metadata_filter_match": result.get("metadata_filter_match"),
+        "metadata_boost": round_optional(result.get("metadata_boost"), digits=4),
+        "matched_filters": result.get("matched_filters") or [],
+        "matched_intents": result.get("matched_intents") or [],
     }
+
+
+def metadata_value(
+    key: str,
+    context_metadata: dict[str, Any],
+    chunk_metadata: dict[str, Any],
+) -> Any:
+    return context_metadata.get(key) if context_metadata.get(key) is not None else chunk_metadata.get(key)
 
 
 def trim_contexts(
@@ -486,6 +546,20 @@ def rerank_pipeline_steps(
     if rerank_error:
         return ["rerank_failed_fallback"]
     return []
+
+
+def metadata_routing_pipeline_steps(routing: dict[str, Any]) -> list[str]:
+    if not routing.get("enabled") or not routing.get("active"):
+        return []
+
+    steps = ["metadata_route_query"]
+    if routing.get("filter_applied"):
+        steps.append("metadata_filter_candidates")
+    if routing.get("filter_fallback"):
+        steps.append("metadata_filter_fallback")
+    if routing.get("boosted_count"):
+        steps.append("metadata_boost_candidates")
+    return steps
 
 
 def retrievers_for_strategy(strategy: RetrievalStrategy) -> list[str]:

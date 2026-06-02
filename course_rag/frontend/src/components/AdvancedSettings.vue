@@ -80,6 +80,36 @@ const askSettings = computed(() => props.settings as AskFormState);
         <input v-model.number="settings.preview_chars" type="number" min="50" max="1000" />
       </label>
 
+      <label class="field">
+        <span>course</span>
+        <input v-model="settings.course" type="text" placeholder="计网 / 编译原理" />
+      </label>
+
+      <label class="field">
+        <span>category</span>
+        <input v-model="settings.category" type="text" placeholder="课件 / 往届期末试题" />
+      </label>
+
+      <label class="field field--wide">
+        <span>source_name</span>
+        <input v-model="settings.source_name" type="text" />
+      </label>
+
+      <label class="field">
+        <span>page</span>
+        <input v-model="settings.page" type="text" />
+      </label>
+
+      <label class="field">
+        <span>modality</span>
+        <input v-model="settings.modality" type="text" placeholder="text" />
+      </label>
+
+      <label class="field">
+        <span>evidence_kind</span>
+        <input v-model="settings.evidence_kind" type="text" placeholder="native_text" />
+      </label>
+
       <template v-if="mode === 'ask'">
         <label class="field">
           <span>temperature</span>
@@ -111,6 +141,13 @@ const askSettings = computed(() => props.settings as AskFormState);
           />
         </label>
       </template>
+    </div>
+
+    <div class="toggle-row advanced-toggle-row">
+      <label class="switch">
+        <input v-model="settings.use_metadata_routing" type="checkbox" />
+        <span>Metadata routing</span>
+      </label>
     </div>
   </details>
 </template>

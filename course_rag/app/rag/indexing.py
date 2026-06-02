@@ -16,6 +16,14 @@ import faiss
 import numpy as np
 
 try:
+    from .evidence import (
+        DEFAULT_TEXT_EVIDENCE_CACHE_PATH,
+        DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
+        evidence_to_loaded_documents,
+        loaded_documents_to_text_evidence,
+        summarize_evidence,
+        write_evidence_jsonl,
+    )
     from .chunking import (
         ChunkedDocument,
         ChunkingConfig,
@@ -28,6 +36,14 @@ try:
         parse_strategy_arg,
     )
 except ImportError:
+    from evidence import (  # type: ignore
+        DEFAULT_TEXT_EVIDENCE_CACHE_PATH,
+        DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
+        evidence_to_loaded_documents,
+        loaded_documents_to_text_evidence,
+        summarize_evidence,
+        write_evidence_jsonl,
+    )
     from chunking import (  # type: ignore
         ChunkedDocument,
         ChunkingConfig,
@@ -45,7 +61,7 @@ logger = logging.getLogger(__name__)
 
 COURSE_RAG_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = COURSE_RAG_ROOT.parent
-DEFAULT_INDEX_DIR = COURSE_RAG_ROOT / "vector_index"
+DEFAULT_INDEX_DIR = COURSE_RAG_ROOT / "vector_index_v2_text"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 INDEX_FILE_NAME = "index.faiss"
 CHUNKS_FILE_NAME = "chunks.jsonl"
@@ -138,6 +154,10 @@ def build_or_load_vector_index(
     batch_size: int = 32,
     strict: bool = False,
     show_progress_bar: bool = True,
+    use_evidence: bool = True,
+    evidence_cache_path: Path | None = None,
+    evidence_pipeline_version: str = DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
+    write_evidence_cache: bool = True,
 ) -> CourseVectorIndex:
     """Load an existing FAISS index or build one from the current corpus."""
 
@@ -166,6 +186,10 @@ def build_or_load_vector_index(
         strict=strict,
         show_progress_bar=show_progress_bar,
         model_cache_root=model_cache_root,
+        use_evidence=use_evidence,
+        evidence_cache_path=evidence_cache_path,
+        evidence_pipeline_version=evidence_pipeline_version,
+        write_evidence_cache=write_evidence_cache,
     )
 
 
@@ -185,6 +209,10 @@ def build_vector_index(
     strict: bool,
     show_progress_bar: bool,
     model_cache_root: Path,
+    use_evidence: bool,
+    evidence_cache_path: Path | None,
+    evidence_pipeline_version: str,
+    write_evidence_cache: bool,
 ) -> CourseVectorIndex:
     """Build a new FAISS index and persist it to disk."""
 
@@ -198,6 +226,22 @@ def build_vector_index(
         backend=backend,
         strict=strict,
     )
+    evidence_stats: dict[str, Any] | None = None
+    resolved_evidence_cache_path: Path | None = None
+    if use_evidence:
+        evidence_documents = loaded_documents_to_text_evidence(
+            documents,
+            pipeline_version=evidence_pipeline_version,
+        )
+        evidence_stats = summarize_evidence(evidence_documents)
+        resolved_evidence_cache_path = resolve_path(
+            evidence_cache_path or DEFAULT_TEXT_EVIDENCE_CACHE_PATH
+        )
+        if write_evidence_cache:
+            write_evidence_jsonl(resolved_evidence_cache_path, evidence_documents)
+            logger.info("Saved text evidence cache to %s", resolved_evidence_cache_path)
+        documents = evidence_to_loaded_documents(evidence_documents)
+
     config = ChunkingConfig(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -230,6 +274,12 @@ def build_vector_index(
         "strategies": strategies,
         "backend": backend,
         "limit": limit,
+        "use_evidence": use_evidence,
+        "evidence_cache_path": safe_repo_relative(resolved_evidence_cache_path)
+        if resolved_evidence_cache_path is not None
+        else None,
+        "evidence_pipeline_version": evidence_pipeline_version if use_evidence else None,
+        "evidence_stats": evidence_stats,
         "chunking_config": asdict(config),
         "chunk_stats": chunking_result.stats,
     }
@@ -370,6 +420,12 @@ def has_saved_index(index_dir: Path) -> bool:
 def summarize_chunk_source(chunk: ChunkedDocument) -> dict[str, Any]:
     metadata = chunk.metadata
     return {
+        "evidence_id": metadata.get("evidence_id"),
+        "source_doc_id": metadata.get("source_doc_id"),
+        "modality": metadata.get("modality"),
+        "evidence_kind": metadata.get("evidence_kind"),
+        "asset_path": metadata.get("asset_path"),
+        "parser_backend": metadata.get("parser_backend"),
         "source": metadata.get("source"),
         "course": metadata.get("course"),
         "category": metadata.get("category"),
@@ -406,6 +462,9 @@ def summarize_vector_index(vector_index: CourseVectorIndex, index_dir: Path) -> 
         "vectors": vector_index.index.ntotal,
         "embedding_model": vector_index.metadata.get("embedding_model"),
         "embedding_dimension": vector_index.metadata.get("embedding_dimension"),
+        "use_evidence": vector_index.metadata.get("use_evidence", False),
+        "evidence_cache_path": vector_index.metadata.get("evidence_cache_path"),
+        "evidence_pipeline_version": vector_index.metadata.get("evidence_pipeline_version"),
         "source_files": stats.get("source_files"),
         "chunks": stats.get("chunks"),
         "parents": stats.get("parents"),
@@ -499,6 +558,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--json", action="store_true", help="Print search results as JSON.")
     parser.add_argument(
+        "--no-evidence",
+        action="store_true",
+        help="Bypass the V2 text evidence layer when rebuilding a legacy text index.",
+    )
+    parser.add_argument(
+        "--evidence-cache",
+        type=Path,
+        default=DEFAULT_TEXT_EVIDENCE_CACHE_PATH,
+        help="JSONL cache path for generated text evidence.",
+    )
+    parser.add_argument(
+        "--evidence-pipeline-version",
+        default=DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
+        help="Pipeline version stored on generated evidence metadata.",
+    )
+    parser.add_argument(
+        "--no-evidence-cache",
+        action="store_true",
+        help="Do not write the generated evidence JSONL cache.",
+    )
+    parser.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable embedding progress bar.",
@@ -525,6 +605,10 @@ def main() -> None:
         batch_size=args.batch_size,
         strict=args.strict,
         show_progress_bar=not args.no_progress,
+        use_evidence=not args.no_evidence,
+        evidence_cache_path=args.evidence_cache,
+        evidence_pipeline_version=args.evidence_pipeline_version,
+        write_evidence_cache=not args.no_evidence_cache,
     )
 
     print(

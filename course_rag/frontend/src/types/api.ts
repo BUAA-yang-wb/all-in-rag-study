@@ -4,6 +4,14 @@ export interface Citation {
   id: number;
   rank?: number | null;
   score: number;
+  evidence_id?: string | null;
+  source_doc_id?: string | null;
+  modality?: string | null;
+  evidence_kind?: string | null;
+  asset_path?: string | null;
+  parser_backend?: string | null;
+  context_before?: string | null;
+  context_after?: string | null;
   source?: string | null;
   source_name?: string | null;
   course?: string | null;
@@ -28,12 +36,34 @@ export interface Citation {
   rerank_rank?: number | null;
   rerank_score?: number | null;
   rerank_model?: string | null;
+  pre_routing_rank?: number | null;
+  pre_routing_score?: number | null;
+  metadata_filter_match?: boolean | null;
+  metadata_boost?: number | null;
+  matched_filters?: string[];
+  matched_intents?: string[];
 }
 
 export interface IndexInfo {
   index_dir: string;
   vectors: number;
   embedding_model?: string | null;
+}
+
+export interface RoutingInfo {
+  enabled?: boolean;
+  active?: boolean;
+  explicit_filters?: Record<string, string | number | boolean | null>;
+  inferred_filters?: Record<string, string | number | boolean | null>;
+  applied_filters?: Record<string, string | number | boolean | null>;
+  intents?: string[];
+  matched_source_name?: string | null;
+  filter_applied?: boolean;
+  filter_fallback?: boolean;
+  candidate_count_before?: number;
+  candidate_count_after?: number;
+  boosted_count?: number;
+  notes?: string[];
 }
 
 export interface HealthResponse {
@@ -69,6 +99,13 @@ export interface AskRequest {
   preview_chars: number;
   temperature: number;
   max_tokens: number;
+  use_metadata_routing: boolean;
+  course?: string;
+  category?: string;
+  source_name?: string;
+  page?: number | string;
+  modality?: string;
+  evidence_kind?: string;
 }
 
 export interface AskResponse {
@@ -85,6 +122,7 @@ export interface AskResponse {
   rerank_model?: string | null;
   rerank_device?: string | null;
   rerank_error?: string | null;
+  routing: RoutingInfo;
   pipeline: string[];
   index: IndexInfo;
 }
@@ -104,6 +142,13 @@ export interface SearchRequest {
   use_parent_context: boolean;
   min_chunk_chars: number;
   preview_chars: number;
+  use_metadata_routing: boolean;
+  course?: string;
+  category?: string;
+  source_name?: string;
+  page?: number | string;
+  modality?: string;
+  evidence_kind?: string;
 }
 
 export interface SearchResponse {
@@ -117,6 +162,7 @@ export interface SearchResponse {
   rerank_model?: string | null;
   rerank_device?: string | null;
   rerank_error?: string | null;
+  routing: RoutingInfo;
   top_k: number;
   pipeline: string[];
   index: IndexInfo;
@@ -142,6 +188,13 @@ export interface AskFormState {
   preview_chars: number;
   temperature: number;
   max_tokens: number;
+  use_metadata_routing: boolean;
+  course: string;
+  category: string;
+  source_name: string;
+  page: string;
+  modality: string;
+  evidence_kind: string;
 }
 
 export interface SearchFormState {
@@ -159,6 +212,13 @@ export interface SearchFormState {
   use_parent_context: boolean;
   min_chunk_chars: number;
   preview_chars: number;
+  use_metadata_routing: boolean;
+  course: string;
+  category: string;
+  source_name: string;
+  page: string;
+  modality: string;
+  evidence_kind: string;
 }
 
 export type NoticeType = "info" | "success" | "warning" | "error";

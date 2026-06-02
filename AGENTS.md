@@ -12,8 +12,7 @@
 4. 必要时阅读 `code/` 下对应示例代码；`code/`、`data/`、`Extra-chapter/` 默认不主动读取，只有计划、文档或用户明确需要时再读取相关文件。
 5. 结合用户当前需求、业务场景和项目现状，选择适合 `course_rag/` 的实现方案。
 6. 在 `course_rag/` 下实现或改进项目功能。
-7. 完成后更新 `my_docs/record/` 下对应记录文档。
-8. 如果改动影响 RAG 主流程，同步更新 `course_rag/docs/RAG_WORKFLOW.md`。
+7. 如果改动影响 RAG 主流程，同步更新 `course_rag/docs/RAG_WORKFLOW.md`。
 
 `my_docs/plan/` 中的文件是初始学习计划，不是强制实现规格。实际执行时应结合用户当前需求、业务场景、主流方法和项目完成度灵活调整。
 
@@ -24,7 +23,7 @@
 常用文档目录：
 
 - `my_docs/plan/`：学习计划，仅作参考。
-- `my_docs/record/`：实际完成记录，需要随阶段成果更新。
+- `my_docs/record/`：实际完成记录，需要随阶段成果更新，和学习计划文档对应。
 - `course_rag/docs/`：项目内部说明文档，尤其是 `RAG_WORKFLOW.md`。
 - `docs/`：默认学习资料来源。
 
@@ -69,7 +68,6 @@
 修改 `course_rag/` 下代码后，按影响范围更新文档：
 
 - 影响 RAG 主流程、模型、索引、检索、rerank、生成、API 参数或返回结构时，更新 `course_rag/docs/RAG_WORKFLOW.md`。
-- 完成某一天计划中的阶段任务时，更新或新增 `my_docs/record/DayXX_*.md`。
 - 不主动修改 `my_docs/plan/`，除非用户明确要求调整计划文件。
 
 文档内容保持简洁，优先记录：
