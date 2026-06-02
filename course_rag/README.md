@@ -20,7 +20,7 @@ course_rag/
 ├─ eval/                 # 评测相关文件
 ├─ scripts/              # 数据处理、索引构建等辅助脚本
 ├─ data/                 # 本地课程资料和处理中间数据
-├─ vector_index/         # 本地 FAISS 向量索引
+├─ vector_index_v2_text/ # 默认 V2 text evidence FAISS 向量索引
 └─ requirements.txt      # Python 后端依赖
 ```
 

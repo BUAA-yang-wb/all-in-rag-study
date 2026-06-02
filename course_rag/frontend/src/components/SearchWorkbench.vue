@@ -32,6 +32,13 @@ const form = reactive<SearchFormState>({
   use_parent_context: true,
   min_chunk_chars: 20,
   preview_chars: 220,
+  use_metadata_routing: true,
+  course: "",
+  category: "",
+  source_name: "",
+  page: "",
+  modality: "",
+  evidence_kind: "",
 });
 
 const resultMeta = computed(() => {
@@ -39,6 +46,28 @@ const resultMeta = computed(() => {
   return `${props.result.strategy} / top_k=${props.result.top_k} / ${
     props.result.retrieval.length || props.result.citations.length
   } 条`;
+});
+
+const routingText = computed(() => {
+  const routing = props.result?.routing;
+  if (!routing?.enabled || !routing.active) return "";
+  const filters = {
+    ...(routing.explicit_filters || {}),
+    ...(routing.inferred_filters || {}),
+  };
+  const filterText = Object.entries(filters)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" / ");
+  const status = routing.filter_fallback
+    ? "routing 回退"
+    : routing.filter_applied
+      ? "routing 过滤"
+      : "routing";
+  const counts =
+    routing.candidate_count_before !== undefined && routing.candidate_count_after !== undefined
+      ? `${routing.candidate_count_before}->${routing.candidate_count_after}`
+      : "";
+  return [status, filterText, counts].filter(Boolean).join(" / ");
 });
 
 function submitForm() {
@@ -127,6 +156,9 @@ function submitForm() {
 
       <div v-if="result?.rerank_error" class="notice notice--warning">
         Rerank 回退：{{ result.rerank_error }}
+      </div>
+      <div v-if="routingText" class="notice notice--info">
+        {{ routingText }}
       </div>
 
       <EvidenceList

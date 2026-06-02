@@ -183,8 +183,11 @@ def default_candidate_k(top_k: int) -> int:
 def build_bm25_document_text(chunk: dict[str, Any]) -> str:
     metadata = chunk.get("metadata", {})
     metadata_parts = [
+        metadata.get("modality"),
+        metadata.get("evidence_kind"),
         metadata.get("source_name"),
         metadata.get("source"),
+        metadata.get("asset_path"),
         metadata.get("course"),
         metadata.get("category"),
         metadata.get("section"),

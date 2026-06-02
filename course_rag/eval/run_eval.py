@@ -63,6 +63,7 @@ def main() -> None:
     args = parse_args()
     dataset_path = resolve_repo_path(args.dataset)
     output_dir = resolve_repo_path(args.output_dir)
+    index_dir = resolve_repo_path(args.index_dir)
     selected_experiments = args.experiment or list(EXPERIMENTS)
 
     items = load_dataset(dataset_path)
@@ -73,9 +74,9 @@ def main() -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Loaded {len(items)} evaluation items from {dataset_path}")
-    print(f"Loading vector index from {DEFAULT_INDEX_DIR}")
+    print(f"Loading vector index from {index_dir}")
     vector_index = build_or_load_vector_index(
-        index_dir=DEFAULT_INDEX_DIR,
+        index_dir=index_dir,
         model_name=DEFAULT_EMBEDDING_MODEL,
         show_progress_bar=False,
     )
@@ -84,6 +85,7 @@ def main() -> None:
     result: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dataset": safe_path(dataset_path),
+        "index_dir": safe_path(index_dir),
         "item_count": len(items),
         "experiments": [],
     }
@@ -100,8 +102,9 @@ def main() -> None:
             )
         )
 
-    json_path = output_dir / RESULT_JSON_NAME
-    markdown_path = output_dir / RESULT_MD_NAME
+    json_name, markdown_name = result_filenames(args.result_prefix)
+    json_path = output_dir / json_name
+    markdown_path = output_dir / markdown_name
     json_path.write_text(
         json.dumps(result, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -117,6 +120,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
+    parser.add_argument(
+        "--result-prefix",
+        default=None,
+        help="Optional output file prefix, for example 'day13_v2_text_eval'.",
+    )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--experiment",
@@ -125,6 +134,15 @@ def parse_args() -> argparse.Namespace:
         help="Run one experiment. Repeat the flag to run multiple experiments.",
     )
     return parser.parse_args()
+
+
+def result_filenames(prefix: str | None) -> tuple[str, str]:
+    if not prefix:
+        return RESULT_JSON_NAME, RESULT_MD_NAME
+    cleaned = prefix.strip()
+    if not cleaned:
+        return RESULT_JSON_NAME, RESULT_MD_NAME
+    return f"{cleaned}.json", f"{cleaned}.md"
 
 
 def resolve_repo_path(path: Path) -> Path:
@@ -223,6 +241,7 @@ def score_item(item: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]
         "citation_hit": 1.0 if hit else 0.0,
         "citation_count": len(citations),
         "top_citations": compact_citations(citations),
+        "routing": response.get("routing"),
         "rerank_used": bool(response.get("rerank_used")),
         "rerank_error": response.get("rerank_error"),
         "error": None,
@@ -244,6 +263,7 @@ def score_error_item(item: dict[str, Any], *, error: str) -> dict[str, Any]:
         "citation_hit": 0.0,
         "citation_count": 0,
         "top_citations": [],
+        "routing": None,
         "rerank_used": False,
         "rerank_error": None,
         "error": error,
@@ -377,12 +397,17 @@ def compact_citations(citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "position": index,
                 "rank": citation.get("rank"),
                 "score": citation.get("score"),
+                "evidence_id": citation.get("evidence_id"),
+                "modality": citation.get("modality"),
+                "evidence_kind": citation.get("evidence_kind"),
                 "source_name": citation.get("source_name"),
                 "source": citation.get("source"),
                 "page": citation.get("page"),
                 "section_path": citation.get("section_path"),
                 "retrieval_strategy": citation.get("retrieval_strategy"),
                 "retrievers": citation.get("retrievers"),
+                "metadata_boost": citation.get("metadata_boost"),
+                "matched_filters": citation.get("matched_filters"),
                 "rerank_score": citation.get("rerank_score"),
             }
         )
@@ -395,6 +420,7 @@ def render_markdown_report(result: dict[str, Any]) -> str:
         "",
         f"- Generated at: `{result['generated_at']}`",
         f"- Dataset: `{result['dataset']}`",
+        f"- Index: `{result.get('index_dir', '-')}`",
         f"- Questions: `{result['item_count']}`",
         "- LLM calls: disabled (`use_llm=false`)",
         "",

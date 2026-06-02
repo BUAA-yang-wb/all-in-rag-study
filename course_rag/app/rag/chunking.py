@@ -339,7 +339,7 @@ def build_parent_document(
     parent_source_type: str,
     section_path: tuple[str, ...],
 ) -> ParentDocument:
-    source_doc_id = source_metadata.get("doc_id") or stable_hash(
+    source_doc_id = source_metadata.get("source_doc_id") or source_metadata.get("doc_id") or stable_hash(
         {"source": source_metadata.get("source"), "document_index": document_index}
     )
     section = section_path[-1] if section_path else source_metadata.get("section")

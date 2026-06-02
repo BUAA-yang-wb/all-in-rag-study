@@ -95,6 +95,13 @@ def ask(request: AskRequest) -> AskResponse:
         use_llm=request.use_llm,
         temperature=request.temperature,
         max_tokens=request.max_tokens,
+        use_metadata_routing=request.use_metadata_routing,
+        course=request.course,
+        category=request.category,
+        source_name=request.source_name,
+        page=request.page,
+        modality=request.modality,
+        evidence_kind=request.evidence_kind,
     )
     try:
         result = answer_question(
@@ -128,6 +135,13 @@ def search(request: SearchRequest) -> SearchResponse:
         preview_chars=request.preview_chars,
         use_parent_context=request.use_parent_context,
         use_llm=False,
+        use_metadata_routing=request.use_metadata_routing,
+        course=request.course,
+        category=request.category,
+        source_name=request.source_name,
+        page=request.page,
+        modality=request.modality,
+        evidence_kind=request.evidence_kind,
     )
     try:
         result = answer_question(
@@ -152,6 +166,7 @@ def search(request: SearchRequest) -> SearchResponse:
         rerank_model=normalized.get("rerank_model"),
         rerank_device=normalized.get("rerank_device"),
         rerank_error=normalized.get("rerank_error"),
+        routing=normalized.get("routing", {}),
         top_k=request.top_k,
         pipeline=normalized["pipeline"],
         index=normalized["index"],
