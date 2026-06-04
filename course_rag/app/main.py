@@ -178,7 +178,19 @@ def ingest(request: IngestRequest) -> IngestResponse:
     """Load the saved index or rebuild it from the current corpus."""
 
     try:
-        vector_index = refresh_vector_index(rebuild=request.rebuild)
+        vector_index = refresh_vector_index(
+            rebuild=request.rebuild,
+            priority=request.priority,
+            include_visual_evidence=request.include_visual_evidence,
+            run_ocr=request.run_ocr,
+            ocr_provider=request.ocr_provider,
+            run_caption=request.run_caption,
+            caption_provider=request.caption_provider,
+            visual_limit=request.visual_limit,
+            ocr_max_pdf_pages=request.ocr_max_pdf_pages,
+            pdf_page_low_text_chars=request.pdf_page_low_text_chars,
+            caption_max_items=request.caption_max_items,
+        )
     except Exception as exc:  # noqa: BLE001 - convert service failures to API errors.
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -205,7 +217,20 @@ def get_vector_index() -> CourseVectorIndex:
     return _vector_index
 
 
-def refresh_vector_index(*, rebuild: bool) -> CourseVectorIndex:
+def refresh_vector_index(
+    *,
+    rebuild: bool,
+    priority: str = "mvp,v2",
+    include_visual_evidence: bool = True,
+    run_ocr: bool = False,
+    ocr_provider: str = "rapidocr",
+    run_caption: bool = False,
+    caption_provider: str = "none",
+    visual_limit: int | None = None,
+    ocr_max_pdf_pages: int | None = None,
+    pdf_page_low_text_chars: int = 80,
+    caption_max_items: int | None = None,
+) -> CourseVectorIndex:
     global _vector_index
     with _index_lock:
         _vector_index = build_or_load_vector_index(
@@ -213,6 +238,16 @@ def refresh_vector_index(*, rebuild: bool) -> CourseVectorIndex:
             model_name=DEFAULT_EMBEDDING_MODEL,
             rebuild=rebuild,
             show_progress_bar=False,
+            priority=priority,
+            include_visual_evidence=include_visual_evidence,
+            run_ocr=run_ocr,
+            ocr_provider=ocr_provider,
+            run_caption=run_caption,
+            caption_provider=caption_provider,
+            visual_limit=visual_limit,
+            ocr_max_pdf_pages=ocr_max_pdf_pages,
+            pdf_page_low_text_chars=pdf_page_low_text_chars,
+            caption_max_items=caption_max_items,
         )
     return _vector_index
 

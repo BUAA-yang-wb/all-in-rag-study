@@ -25,6 +25,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import unquote
 from xml.etree import ElementTree
 
 
@@ -71,6 +72,7 @@ def read_manifest(
     priority: str = "mvp",
     strategies: set[str] | None = None,
     limit: int | None = None,
+    skip_low_text_pdfs: bool = False,
 ) -> list[dict[str, Any]]:
     """Read manifest records filtered by priority and parse strategy."""
 
@@ -78,6 +80,7 @@ def read_manifest(
         raise FileNotFoundError(f"Manifest not found: {manifest_path}")
 
     selected_strategies = strategies or SUPPORTED_STRATEGIES
+    selected_priorities = parse_priority_filter(priority)
     records: list[dict[str, Any]] = []
 
     with manifest_path.open("r", encoding="utf-8") as f:
@@ -91,9 +94,11 @@ def read_manifest(
                 raise ValueError(f"Invalid JSON on manifest line {line_no}: {exc}") from exc
 
             record = normalize_manifest_record(raw_record)
-            if priority != "all" and record.get("priority") != priority:
+            if selected_priorities is not None and record.get("priority") not in selected_priorities:
                 continue
             if record.get("parse_strategy") not in selected_strategies:
+                continue
+            if skip_low_text_pdfs and is_low_text_pdf_record(record):
                 continue
 
             records.append(record)
@@ -101,6 +106,22 @@ def read_manifest(
                 break
 
     return records
+
+
+def parse_priority_filter(priority: str) -> set[str] | None:
+    """Return selected manifest priorities, or None for all priorities."""
+
+    if priority == "all":
+        return None
+    selected = {item.strip() for item in priority.split(",") if item.strip()}
+    return selected or {"mvp"}
+
+
+def is_low_text_pdf_record(record: dict[str, Any]) -> bool:
+    return (
+        str(record.get("file_type", "")).lower() == "pdf"
+        and record.get("is_text_extractable") is False
+    )
 
 
 def normalize_manifest_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -137,6 +158,7 @@ def load_documents(
     backend: str = "auto",
     cache_root: Path = DEFAULT_PARSED_CACHE_ROOT,
     strict: bool = False,
+    skip_low_text_pdfs: bool = False,
 ) -> list[LoadedDocument]:
     """Load documents described by the manifest.
 
@@ -161,6 +183,7 @@ def load_documents(
         priority=priority,
         strategies=strategies,
         limit=limit,
+        skip_low_text_pdfs=skip_low_text_pdfs,
     )
 
     documents: list[LoadedDocument] = []
@@ -677,7 +700,7 @@ def extract_markdown_image_refs(text: str, markdown_path: Path) -> list[dict[str
 
 def build_image_ref(target: str, markdown_path: Path, alt: str) -> dict[str, str]:
     original_target = target.strip()
-    cleaned_target = original_target.strip("<>").strip().replace("\\", "/")
+    cleaned_target = unquote(original_target.strip("<>").strip().replace("\\", "/"))
     if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned_target):
         resolved = cleaned_target
     else:

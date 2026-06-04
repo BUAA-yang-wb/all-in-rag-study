@@ -1,6 +1,6 @@
 # Course RAG 工作流
 
-最后更新：2026-06-02
+最后更新：2026-06-04
 
 本文档记录 `course_rag` 当前 RAG 系统从用户输入问题到返回答案的主流程。后续改进检索、rerank、生成或接口时，需要同步更新本文档。
 
@@ -36,7 +36,7 @@
 
 | 阶段 | 当前实现 |
 | --- | --- |
-| 数据范围 | `course_rag/data/processed/data_manifest.jsonl` 中 priority 为 `mvp` 的资料 |
+| 数据范围 | `course_rag/data/processed/data_manifest.jsonl` 中 priority 为 `mvp,v2` 的资料，默认排除 `skip` |
 | 文档加载 | `loaders.py`，按文件类型读取 PDF、Markdown、DOCX 等资料 |
 | chunk 策略 | `chunking.py`，父文档保留较大上下文，子 chunk 用于检索 |
 | 默认 chunk 参数 | `chunk_size=500`，`chunk_overlap=80` |
@@ -47,15 +47,21 @@
 | 索引目录 | `course_rag/vector_index_v2_text/` |
 | 元数据文件 | `chunks.jsonl`、`parents.jsonl`、`parent_child_map.json`、`index_meta.json` |
 
-### V2 Text Evidence 证据层
+### V2 Evidence 证据层
 
-V2 首批改动新增了 `course_rag/app/rag/evidence.py`，用于把现有 `LoadedDocument` 转换为统一的 `EvidenceDocument` 后再进入原有 chunk/index 流程。
+V2 新增了 `course_rag/app/rag/evidence.py` 和 `course_rag/app/rag/visual_evidence.py`，用于把文本、图片、OCR 和可选 caption 统一成 `EvidenceDocument` 后再进入原有 chunk/index 流程。
 
-当前只启用文本证据：
+当前默认在线链路只消费已经构建好的 evidence 索引，不在 `/ask` 或 `/search` 中实时运行 OCR/VLM。
 
 ```text
 LoadedDocument
 -> EvidenceDocument(modality=text, evidence_kind=native_text)
+图片/Markdown image_refs
+-> EvidenceDocument(modality=image, evidence_kind=image_metadata|image_ref)
+可选离线 OCR
+-> EvidenceDocument(evidence_kind=ocr_text)
+可选离线 VLM caption
+-> EvidenceDocument(evidence_kind=caption)
 -> LoadedDocument 兼容形态
 -> ParentDocument / ChunkedDocument
 -> 当前 FAISS + hybrid + rerank 流程
@@ -67,19 +73,64 @@ LoadedDocument
 course_rag/vector_index_v2_text/
 ```
 
-默认重建会生成 text evidence；如需显式重建：
+默认重建会生成 text evidence 和 image metadata/image_ref evidence：
 
 ```powershell
 .\rag\Scripts\python.exe course_rag\app\rag\indexing.py --rebuild
 ```
 
-生成的 text evidence 缓存默认写入：
+OCR 与 caption 需要显式离线参数触发。OCR 当前使用 RapidOCR；caption 当前只作为可选接入，不默认运行：
+
+```powershell
+.\rag\Scripts\python.exe course_rag\app\rag\indexing.py --rebuild --run-ocr --ocr-provider rapidocr --pdf-page-low-text-chars 80
+```
+
+默认重建会写入文本、图片和合并 evidence 缓存：
 
 ```text
 course_rag/data/processed/evidence_text.jsonl
+course_rag/data/processed/evidence_image.jsonl
+course_rag/data/processed/evidence_v2.jsonl
+```
+
+OCR 与 caption 缓存只有在显式启用对应离线任务后才会写入或更新：
+
+```text
+course_rag/data/processed/evidence_ocr.jsonl
+course_rag/data/processed/evidence_caption.jsonl
 ```
 
 `evidence_id` 基于来源、页码、section、证据类型等稳定字段生成，不依赖 chunk 文本内容；chunk 和 parent 会透传 `evidence_id`、`source_doc_id`、`modality`、`evidence_kind`、`asset_path`、`parser_backend` 等字段。
+
+OCR 默认 provider 是当前虚拟环境中已安装的 RapidOCR；它用于离线生成 `ocr_text` evidence。已下载的 PP-OCRv5 Paddle 模型作为后续可选 provider，不是默认运行依赖。
+
+PDF OCR 候选页采用页级策略，而不是只按整个 PDF 文件判断：
+
+- 默认不运行 OCR/caption 时，不扫描 PDF 页、不渲染页图。
+- 启用 `--run-ocr` 或 `--run-caption` 后，会对 priority 范围内的 PDF 做页级文本层检查。
+- 如果数据清单中该 PDF 已标记为 `is_text_extractable=false`，说明文件整体文本抽取能力很差，当前会把该文件已扫描范围内的页面都作为候选页。
+- 如果 PDF 有文本层，则只把单页去空白后的文本字符数低于 `--pdf-page-low-text-chars` 的页面作为候选页；默认阈值是 80。
+- 只有候选页会被 `pypdfium2` 渲染到 `course_rag/data/processed/page_images/`，随后再交给 OCR 或 caption provider。
+
+VLM caption 默认不运行。需要离线生成 caption 时，显式使用 `--run-caption --caption-provider llama-cpp-cli`，并配置本地 llama.cpp CLI、GGUF 和 mmproj 路径。caption 生成结果写入缓存并重建索引后，在线问答才会检索到 caption evidence。
+
+`POST /ingest` 同样支持 `run_ocr`、`ocr_provider`、`run_caption`、`caption_provider`、`visual_limit`、`ocr_max_pdf_pages`、`pdf_page_low_text_chars` 和 `caption_max_items` 等离线重建参数。在线 `/ask` 和 `/search` 只读取已经写入索引的缓存结果，不实时运行 OCR/VLM。
+
+截至 2026-06-04 检查，当前已构建的默认索引状态是：
+
+| 项 | 当前值 |
+| --- | --- |
+| 索引更新时间 | 2026-06-03 22:39:37 |
+| priority 范围 | `mvp,v2` |
+| evidence 总数 | 4587 |
+| native_text evidence | 4243 |
+| image_metadata evidence | 177 |
+| image_ref evidence | 167 |
+| OCR / caption evidence | 当前默认索引为 0；代码已接入，但未默认全量生成 |
+| chunk / parent 数量 | 7904 chunks / 4700 parents |
+| 来源文件数 | 261 |
+
+因此当前在线默认链路已经覆盖文本 evidence 和图片 metadata/image_ref evidence；扫描页 OCR、图片 caption 和后续 table evidence 仍需要继续做离线构建、评测和按需接入。
 
 ## 在线问答流程
 

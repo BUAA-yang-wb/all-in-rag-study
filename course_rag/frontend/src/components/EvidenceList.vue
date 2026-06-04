@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { FileText, GitBranch, Hash, Layers, MapPinned } from "lucide-vue-next";
+import { FileImage, FileText, GitBranch, Hash, Layers, MapPinned } from "lucide-vue-next";
 
 import type { Citation } from "@/types/api";
 
@@ -90,6 +90,10 @@ function diagnosticChips(item: Citation): string[] {
         <span v-if="item.chunk_id" class="mini-chip">
           <FileText :size="13" aria-hidden="true" />
           {{ item.chunk_id }}
+        </span>
+        <span v-if="item.asset_path" class="mini-chip">
+          <FileImage :size="13" aria-hidden="true" />
+          {{ item.asset_path }}
         </span>
         <span v-for="chip in diagnosticChips(item)" :key="chip" class="mini-chip">
           <GitBranch :size="13" aria-hidden="true" />
