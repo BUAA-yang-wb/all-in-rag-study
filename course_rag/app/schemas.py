@@ -156,6 +156,7 @@ class IngestRequest(BaseModel):
     rebuild: bool = False
     priority: str = "mvp,v2"
     include_visual_evidence: bool = True
+    include_table_evidence: bool = True
     run_ocr: bool = False
     ocr_provider: str = "rapidocr"
     run_caption: bool = False

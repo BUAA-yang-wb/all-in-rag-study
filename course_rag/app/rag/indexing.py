@@ -35,6 +35,11 @@ try:
         load_documents,
         parse_strategy_arg,
     )
+    from .table_evidence import (
+        DEFAULT_TABLE_EVIDENCE_CACHE_PATH,
+        TableEvidenceConfig,
+        build_table_evidence,
+    )
     from .visual_evidence import (
         DEFAULT_CAPTION_EVIDENCE_CACHE_PATH,
         DEFAULT_CAPTION_PROVIDER,
@@ -65,6 +70,11 @@ except ImportError:
         DEFAULT_MANIFEST_PATH as LOADER_DEFAULT_MANIFEST_PATH,
         load_documents,
         parse_strategy_arg,
+    )
+    from table_evidence import (  # type: ignore
+        DEFAULT_TABLE_EVIDENCE_CACHE_PATH,
+        TableEvidenceConfig,
+        build_table_evidence,
     )
     from visual_evidence import (  # type: ignore
         DEFAULT_CAPTION_EVIDENCE_CACHE_PATH,
@@ -182,6 +192,7 @@ def build_or_load_vector_index(
     evidence_pipeline_version: str = DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
     write_evidence_cache: bool = True,
     include_visual_evidence: bool = True,
+    include_table_evidence: bool = True,
     combined_evidence_cache_path: Path | None = None,
     run_ocr: bool = False,
     ocr_provider: str = DEFAULT_OCR_PROVIDER,
@@ -224,6 +235,7 @@ def build_or_load_vector_index(
         evidence_pipeline_version=evidence_pipeline_version,
         write_evidence_cache=write_evidence_cache,
         include_visual_evidence=include_visual_evidence,
+        include_table_evidence=include_table_evidence,
         combined_evidence_cache_path=combined_evidence_cache_path,
         run_ocr=run_ocr,
         ocr_provider=ocr_provider,
@@ -257,6 +269,7 @@ def build_vector_index(
     evidence_pipeline_version: str,
     write_evidence_cache: bool,
     include_visual_evidence: bool,
+    include_table_evidence: bool,
     combined_evidence_cache_path: Path | None,
     run_ocr: bool,
     ocr_provider: str,
@@ -286,11 +299,14 @@ def build_vector_index(
     )
     evidence_stats: dict[str, Any] | None = None
     visual_stats: dict[str, Any] | None = None
+    table_stats: dict[str, Any] | None = None
     resolved_text_evidence_cache_path: Path | None = None
+    resolved_table_evidence_cache_path: Path | None = None
     resolved_combined_evidence_cache_path: Path | None = None
     if use_evidence:
+        source_documents = list(documents)
         evidence_documents = loaded_documents_to_text_evidence(
-            documents,
+            source_documents,
             pipeline_version=evidence_pipeline_version,
         )
         resolved_text_evidence_cache_path = resolve_path(
@@ -323,6 +339,19 @@ def build_vector_index(
             )
             evidence_documents.extend(visual_result.evidence_documents)
             visual_stats = visual_result.stats
+
+        if include_table_evidence:
+            resolved_table_evidence_cache_path = resolve_path(DEFAULT_TABLE_EVIDENCE_CACHE_PATH)
+            table_result = build_table_evidence(
+                source_documents,
+                config=TableEvidenceConfig(
+                    repo_root=REPO_ROOT,
+                    cache_path=DEFAULT_TABLE_EVIDENCE_CACHE_PATH,
+                    write_cache=write_evidence_cache,
+                ),
+            )
+            evidence_documents.extend(table_result.evidence_documents)
+            table_stats = table_result.stats
 
         evidence_stats = summarize_evidence(evidence_documents)
         resolved_combined_evidence_cache_path = resolve_path(
@@ -367,6 +396,7 @@ def build_vector_index(
         "limit": limit,
         "use_evidence": use_evidence,
         "include_visual_evidence": include_visual_evidence,
+        "include_table_evidence": include_table_evidence,
         "run_ocr": run_ocr,
         "ocr_provider": ocr_provider if include_visual_evidence else None,
         "run_caption": run_caption,
@@ -381,9 +411,13 @@ def build_vector_index(
         "text_evidence_cache_path": safe_repo_relative(resolved_text_evidence_cache_path)
         if resolved_text_evidence_cache_path is not None
         else None,
+        "table_evidence_cache_path": safe_repo_relative(resolved_table_evidence_cache_path)
+        if resolved_table_evidence_cache_path is not None
+        else None,
         "evidence_pipeline_version": evidence_pipeline_version if use_evidence else None,
         "evidence_stats": evidence_stats,
         "visual_evidence_stats": visual_stats,
+        "table_evidence_stats": table_stats,
         "chunking_config": asdict(config),
         "chunk_stats": chunking_result.stats,
     }
@@ -568,9 +602,11 @@ def summarize_vector_index(vector_index: CourseVectorIndex, index_dir: Path) -> 
         "embedding_dimension": vector_index.metadata.get("embedding_dimension"),
         "use_evidence": vector_index.metadata.get("use_evidence", False),
         "include_visual_evidence": vector_index.metadata.get("include_visual_evidence", False),
+        "include_table_evidence": vector_index.metadata.get("include_table_evidence", False),
         "evidence_cache_path": vector_index.metadata.get("evidence_cache_path"),
         "evidence_pipeline_version": vector_index.metadata.get("evidence_pipeline_version"),
         "visual_evidence_stats": vector_index.metadata.get("visual_evidence_stats"),
+        "table_evidence_stats": vector_index.metadata.get("table_evidence_stats"),
         "source_files": stats.get("source_files"),
         "chunks": stats.get("chunks"),
         "parents": stats.get("parents"),
@@ -696,6 +732,11 @@ def parse_args() -> argparse.Namespace:
         help="Disable V2 image, OCR, and caption evidence when rebuilding.",
     )
     parser.add_argument(
+        "--no-table-evidence",
+        action="store_true",
+        help="Disable V2 table evidence when rebuilding.",
+    )
+    parser.add_argument(
         "--run-ocr",
         action="store_true",
         help="Run offline OCR for missing visual targets before rebuilding the index.",
@@ -771,6 +812,7 @@ def main() -> None:
         evidence_pipeline_version=args.evidence_pipeline_version,
         write_evidence_cache=not args.no_evidence_cache,
         include_visual_evidence=not args.no_visual_evidence,
+        include_table_evidence=not args.no_table_evidence,
         combined_evidence_cache_path=args.combined_evidence_cache,
         run_ocr=args.run_ocr,
         ocr_provider=args.ocr_provider,

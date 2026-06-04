@@ -1,216 +1,151 @@
-# Course RAG 工作流
+# Course RAG 当前工作流
 
 最后更新：2026-06-04
 
-本文档记录 `course_rag` 当前 RAG 系统从用户输入问题到返回答案的主流程。后续改进检索、rerank、生成或接口时，需要同步更新本文档。
+本文档总结 `course_rag` 当前系统从资料入库、检索到回答生成的主流程。后续如果改动索引、检索、rerank、生成、API 参数或返回结构，需要同步更新本文档。
 
-## 当前入口
+## 1. 服务入口
 
-主要服务入口是 FastAPI：
+FastAPI 入口位于 `course_rag/app/main.py`：
 
-- `POST /ask`：执行检索、上下文组装和答案生成。
-- `POST /search`：只执行检索和上下文返回，不调用 LLM。
-- `POST /ingest`：加载或重建本地向量索引。
+- `POST /ask`：检索资料、组装上下文，并按需调用 LLM 生成答案。
+- `POST /search`：只返回检索结果和 citation，不调用 LLM。
+- `POST /ingest`：加载或重建本地索引。
 - `GET /health`：返回服务和索引状态。
 
-默认虚拟环境：
+默认运行环境：
 
 ```powershell
 .\rag\Scripts\python.exe
 ```
 
-## 离线索引构建流程
+默认启动服务：
 
-索引构建由 `course_rag/app/rag/indexing.py` 负责。
+```powershell
+.\rag\Scripts\python.exe -X utf8 -m uvicorn course_rag.app.main:app --reload
+```
+
+## 2. 离线索引构建
+
+索引构建由 `course_rag/app/rag/indexing.py` 负责。当前流程是：
 
 ```text
 课程资料
--> 数据清单
--> 文档加载
--> V2 EvidenceDocument 证据层
+-> data_manifest.jsonl
+-> loaders.py 读取 PDF / Markdown / DOCX / 图片等资料
+-> 统一转换为 EvidenceDocument
 -> 父子 chunk 切分
--> embedding 编码
--> FAISS 索引保存
--> chunk / parent 元数据保存
+-> BAAI/bge-small-zh-v1.5 embedding
+-> FAISS IndexFlatIP
+-> 保存 chunks / parents / parent_child_map / index_meta
 ```
 
-| 阶段 | 当前实现 |
+当前索引配置：
+
+| 项 | 当前值 |
 | --- | --- |
-| 数据范围 | `course_rag/data/processed/data_manifest.jsonl` 中 priority 为 `mvp,v2` 的资料，默认排除 `skip` |
-| 文档加载 | `loaders.py`，按文件类型读取 PDF、Markdown、DOCX 等资料 |
-| chunk 策略 | `chunking.py`，父文档保留较大上下文，子 chunk 用于检索 |
-| 默认 chunk 参数 | `chunk_size=500`，`chunk_overlap=80` |
+| 索引目录 | `course_rag/vector_index_v2_text/` |
 | embedding 模型 | `BAAI/bge-small-zh-v1.5` |
 | 向量维度 | 512 |
-| 向量索引 | FAISS `IndexFlatIP` |
-| 相似度策略 | embedding 归一化后使用 inner product，可按 cosine similarity 理解 |
-| 索引目录 | `course_rag/vector_index_v2_text/` |
-| 元数据文件 | `chunks.jsonl`、`parents.jsonl`、`parent_child_map.json`、`index_meta.json` |
+| 相似度 | 归一化 embedding + inner product，可按 cosine similarity 理解 |
+| chunk 参数 | `chunk_size=500`，`chunk_overlap=80` |
+| 当前 vectors | 9138 |
+| parent 数 | 5840 |
+| parent-child 映射 | 9138 |
 
-### V2 Evidence 证据层
+## 3. 统一证据层
 
-V2 新增了 `course_rag/app/rag/evidence.py` 和 `course_rag/app/rag/visual_evidence.py`，用于把文本、图片、OCR 和可选 caption 统一成 `EvidenceDocument` 后再进入原有 chunk/index 流程。
+系统不会把原始文件直接切 chunk，而是先把不同来源的资料统一成 `EvidenceDocument`。这样 citation、过滤和调试都可以使用同一套 metadata。
 
-当前默认在线链路只消费已经构建好的 evidence 索引，不在 `/ask` 或 `/search` 中实时运行 OCR/VLM。
+当前 evidence 类型：
 
-```text
-LoadedDocument
--> EvidenceDocument(modality=text, evidence_kind=native_text)
-图片/Markdown image_refs
--> EvidenceDocument(modality=image, evidence_kind=image_metadata|image_ref)
-可选离线 OCR
--> EvidenceDocument(evidence_kind=ocr_text)
-可选离线 VLM caption
--> EvidenceDocument(evidence_kind=caption)
--> LoadedDocument 兼容形态
--> ParentDocument / ChunkedDocument
--> 当前 FAISS + hybrid + rerank 流程
-```
+| 类型 | evidence_kind | 来源与说明 |
+| --- | --- | --- |
+| 文本 | `native_text` | PDF 文本层、Markdown、DOCX 等普通文本 |
+| 图片元数据 | `image_metadata` | 独立图片文件，记录文件名、课程、类别、路径等 |
+| Markdown 图片引用 | `image_ref` | Markdown 中引用的图片，并带所在章节和前后文 |
+| OCR 文本 | `ocr_text` | RapidOCR 离线识别图片或低文本 PDF 页得到的文字 |
+| 表格 | `table_markdown` | Docling 表格结构优先，Markdown/PDF 类表格文本兜底 |
+| 图片 caption | `caption` | 已接入但默认关闭，不生成也不纳入默认索引 |
 
-当前默认索引目录为：
+### 资料类型处理策略
 
-```text
-course_rag/vector_index_v2_text/
-```
+不同资料进入索引前会走不同的处理路径，目标是尽量保留可检索文本、原始位置和可追溯引用。
 
-默认重建会生成 text evidence 和 image metadata/image_ref evidence：
+| 资料类型 | 当前处理方式 | 简短理由 |
+| --- | --- | --- |
+| 文本层 PDF | 优先用 `pypdf` 按页抽取文本，生成 `native_text`；页码写入 metadata | 课程课件和试卷大多有文本层，按页保留能让 citation 回到具体页 |
+| 低文本 PDF / 扫描页 | 显式运行 OCR 时，按页判断文本量，低文本页渲染成图片后交给 RapidOCR，生成 `ocr_text` | 避免对所有 PDF 页做昂贵 OCR，只补文本层不足的页面 |
+| Markdown | 读取正文生成 `native_text`；同时解析 Markdown 图片引用，生成 `image_ref` | Markdown 正文适合直接检索，图片引用需要带上所在章节和前后文，方便问图相关问题 |
+| DOCX | 通过 Docling 转成 Markdown/JSON，再作为文本 evidence 入库 | DOCX 结构比纯文本复杂，先转成统一 Markdown 形态，后续 chunk 逻辑更稳定 |
+| 独立图片 | 不直接做视觉向量；默认生成 `image_metadata`，记录文件名、课程、类别和 `asset_path` | 当前在线链路是文本检索，先让图片至少能按文件名、路径和上下文被发现 |
+| 图片 OCR | 显式运行 OCR 后，对独立图片、Markdown 图片引用和候选 PDF 页图生成 `ocr_text` | OCR 解决“图片里写了什么”，结果缓存后进入普通文本检索链路 |
+| 表格 | 优先读取 Docling JSON 中的结构化表格；缺失时从 Markdown/PDF 文本中抽连续类表格行，统一转成 Markdown 表格 | 表格直接混在普通文本 chunk 中容易丢表头或列关系，单独 evidence 更适合表格问答和引用 |
+| VLM caption | provider 已接入，但默认不生成、不读取、不索引；需要时显式运行 caption 离线任务 | 本地 VLM 成本和质量不稳定，默认关闭可以避免慢任务和幻觉污染索引 |
 
-```powershell
-.\rag\Scripts\python.exe course_rag\app\rag\indexing.py --rebuild
-```
+PDF OCR 候选页采用页级策略。默认重建不会扫描或渲染 PDF 页；只有显式 `--run-ocr` 时，才会检查页面文本量。对于已标记为低文本的 PDF，会把已扫描范围内页面作为候选；普通文本层 PDF 只处理去空白字符数低于 `--pdf-page-low-text-chars` 的页面，默认阈值是 80。
 
-OCR 与 caption 需要显式离线参数触发。OCR 当前使用 RapidOCR；caption 当前只作为可选接入，不默认运行：
+表格抽取是保守策略：Docling 表格质量较高时优先使用；文本兜底只接受连续 2 行以上、2 列以上的表格形态。小表整表入库，大表按最多 20 行切分，并在每个切片保留表头，避免检索命中时丢失列含义。
 
-```powershell
-.\rag\Scripts\python.exe course_rag\app\rag\indexing.py --rebuild --run-ocr --ocr-provider rapidocr --pdf-page-low-text-chars 80
-```
+默认重建会生成文本、图片和表格 evidence；如果已有 OCR 缓存，也会读取 OCR evidence 进入索引。默认不会运行 OCR，也不会读取或索引 caption 缓存。
 
-默认重建会写入文本、图片和合并 evidence 缓存：
+常用缓存文件：
 
 ```text
 course_rag/data/processed/evidence_text.jsonl
 course_rag/data/processed/evidence_image.jsonl
+course_rag/data/processed/evidence_ocr.jsonl
+course_rag/data/processed/evidence_table.jsonl
 course_rag/data/processed/evidence_v2.jsonl
 ```
 
-OCR 与 caption 缓存只有在显式启用对应离线任务后才会写入或更新：
+重建默认索引：
 
-```text
-course_rag/data/processed/evidence_ocr.jsonl
-course_rag/data/processed/evidence_caption.jsonl
+```powershell
+.\rag\Scripts\python.exe -X utf8 course_rag\app\rag\indexing.py --rebuild --no-progress
 ```
 
-`evidence_id` 基于来源、页码、section、证据类型等稳定字段生成，不依赖 chunk 文本内容；chunk 和 parent 会透传 `evidence_id`、`source_doc_id`、`modality`、`evidence_kind`、`asset_path`、`parser_backend` 等字段。
+显式更新 OCR 缓存并重建索引：
 
-OCR 默认 provider 是当前虚拟环境中已安装的 RapidOCR；它用于离线生成 `ocr_text` evidence。已下载的 PP-OCRv5 Paddle 模型作为后续可选 provider，不是默认运行依赖。
+```powershell
+.\rag\Scripts\python.exe -X utf8 course_rag\app\rag\indexing.py --rebuild --run-ocr --ocr-provider rapidocr --pdf-page-low-text-chars 80 --no-progress
+```
 
-PDF OCR 候选页采用页级策略，而不是只按整个 PDF 文件判断：
+OCR 是离线任务，不在 `/ask` 或 `/search` 中实时运行。低文本 PDF 页会先渲染到 `course_rag/data/processed/page_images/`，再交给 RapidOCR。caption 需要显式 `--run-caption --caption-provider llama-cpp-cli` 并配置本地 VLM 运行时；当前默认关闭。
 
-- 默认不运行 OCR/caption 时，不扫描 PDF 页、不渲染页图。
-- 启用 `--run-ocr` 或 `--run-caption` 后，会对 priority 范围内的 PDF 做页级文本层检查。
-- 如果数据清单中该 PDF 已标记为 `is_text_extractable=false`，说明文件整体文本抽取能力很差，当前会把该文件已扫描范围内的页面都作为候选页。
-- 如果 PDF 有文本层，则只把单页去空白后的文本字符数低于 `--pdf-page-low-text-chars` 的页面作为候选页；默认阈值是 80。
-- 只有候选页会被 `pypdfium2` 渲染到 `course_rag/data/processed/page_images/`，随后再交给 OCR 或 caption provider。
+截至当前索引，evidence 统计为：
 
-VLM caption 默认不运行。需要离线生成 caption 时，显式使用 `--run-caption --caption-provider llama-cpp-cli`，并配置本地 llama.cpp CLI、GGUF 和 mmproj 路径。caption 生成结果写入缓存并重建索引后，在线问答才会检索到 caption evidence。
+| evidence_kind | 数量 |
+| --- | ---: |
+| `native_text` | 4243 |
+| `image_metadata` | 177 |
+| `image_ref` | 167 |
+| `ocr_text` | 998 |
+| `table_markdown` | 139 |
+| `caption` | 0 |
+| 合计 | 5724 |
 
-`POST /ingest` 同样支持 `run_ocr`、`ocr_provider`、`run_caption`、`caption_provider`、`visual_limit`、`ocr_max_pdf_pages`、`pdf_page_low_text_chars` 和 `caption_max_items` 等离线重建参数。在线 `/ask` 和 `/search` 只读取已经写入索引的缓存结果，不实时运行 OCR/VLM。
+## 4. 在线检索流程
 
-截至 2026-06-04 检查，当前已构建的默认索引状态是：
-
-| 项 | 当前值 |
-| --- | --- |
-| 索引更新时间 | 2026-06-03 22:39:37 |
-| priority 范围 | `mvp,v2` |
-| evidence 总数 | 4587 |
-| native_text evidence | 4243 |
-| image_metadata evidence | 177 |
-| image_ref evidence | 167 |
-| OCR / caption evidence | 当前默认索引为 0；代码已接入，但未默认全量生成 |
-| chunk / parent 数量 | 7904 chunks / 4700 parents |
-| 来源文件数 | 261 |
-
-因此当前在线默认链路已经覆盖文本 evidence 和图片 metadata/image_ref evidence；扫描页 OCR、图片 caption 和后续 table evidence 仍需要继续做离线构建、评测和按需接入。
-
-## 在线问答流程
-
-`POST /ask` 的主流程由 `course_rag/app/rag/generation.py` 负责。
+`/ask` 和 `/search` 都走同一套检索主链路，核心逻辑在 `course_rag/app/rag/generation.py`、`retrieval.py`、`routing.py` 和 `rerank.py`。
 
 ```text
 用户问题
--> 请求参数解析
 -> 加载本地索引
--> 混合检索召回候选
+-> dense / BM25 / hybrid 召回
 -> metadata routing 过滤或加权
--> 默认 rerank 精排（可关闭）
--> 短 chunk 过滤
--> parent 去重
--> 父文档上下文组装
--> prompt 构造
--> LLM 生成
--> 答案、引用、检索调试信息返回
+-> rerank 精排
+-> 过滤短 chunk
+-> 按 parent 去重
+-> 组装上下文和 citation
+-> /ask 调用 LLM，/search 直接返回检索结果
 ```
 
-## 1. 请求参数解析
+当前默认检索策略是 `hybrid`：
 
-请求模型位于 `course_rag/app/schemas.py`。
-
-`/ask` 当前主要参数：
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `question` | 必填 | 用户问题 |
-| `top_k` | 5 | 最终返回的引用数量 |
-| `candidate_k` | 空 | 检索候选数量；为空时由系统计算 |
-| `strategy` | `hybrid` | 检索策略，可选 `hybrid`、`dense`、`bm25` |
-| `rrf_k` | 60 | RRF 融合参数 |
-| `use_rerank` | `true` | 是否启用 cross-encoder rerank；默认开启 |
-| `rerank_top_n` | 20 | 送入 reranker 的候选数量 |
-| `rerank_model` | `BAAI/bge-reranker-base` | 默认 reranker 模型 |
-| `rerank_device` | `auto` | 自动选择 CUDA 或 CPU |
-| `rerank_local_files_only` | `true` | 默认只读本地缓存，避免自动下载模型 |
-| `use_parent_context` | `true` | 使用父文档作为生成上下文 |
-| `use_llm` | `true` | 是否调用 LLM |
-| `use_metadata_routing` | `true` | 是否启用课程、文件、页码等 metadata routing |
-| `course` / `category` | 空 | 可选显式过滤课程或资料类别 |
-| `source_name` / `page` | 空 | 可选显式过滤文件名或页码 |
-| `modality` / `evidence_kind` | 空 | 可选显式过滤 evidence 类型 |
-| `max_context_chars` | 6000 | prompt 上下文总长度上限 |
-| `max_context_chars_per_source` | 1600 | 单个来源上下文长度上限 |
-
-## 2. 索引加载
-
-在线问答默认加载 `course_rag/vector_index_v2_text/`。
-
-加载内容：
-
-- FAISS 向量索引：`index.faiss`
-- 子 chunk：`chunks.jsonl`
-- 父文档：`parents.jsonl`
-- 父子映射：`parent_child_map.json`
-- 索引配置：`index_meta.json`
-
-索引对象为 `CourseVectorIndex`，在服务进程中缓存复用。
-
-## 3. 检索召回
-
-检索模块位于 `course_rag/app/rag/retrieval.py`。
-
-当前默认策略是 `hybrid`：
-
-```text
-dense 检索
-+ BM25 检索
--> RRF 融合
--> 默认 rerank
--> 候选结果排序
-```
-
-| 策略 | 当前实现 |
-| --- | --- |
-| `dense` | 使用 `BAAI/bge-small-zh-v1.5` 编码问题，在 FAISS 中检索相似 chunk |
-| `bm25` | 使用 `rank-bm25`，基于已加载 chunks 在内存中构建 BM25 索引 |
-| `hybrid` | dense 和 BM25 分别召回候选，再按 RRF 分数融合 |
+- dense：用 `BAAI/bge-small-zh-v1.5` 编码问题，在 FAISS 中检索。
+- BM25：用 `rank-bm25` 在内存中基于 chunk 正文和部分 metadata 检索。
+- hybrid：dense 和 BM25 分别召回后，用 RRF 融合排序。
 
 默认候选数量：
 
@@ -218,149 +153,74 @@ dense 检索
 candidate_k = max(top_k * 4, 30)
 ```
 
-BM25 分词策略：
+默认 rerank 开启，模型为 `BAAI/bge-reranker-base`。如果本地没有 reranker 缓存，系统会保留原检索排序并返回 `rerank_error`，不会中断请求。需要关闭时传：
 
-- 英文、数字、缩写和带 `/` 的术语会作为 token 保留。
-- 中文文本使用 2-gram 和 3-gram。
-- BM25 文本包含 chunk 正文和部分元数据字段。
-
-RRF 分数：
-
-```text
-score = sum(1 / (rrf_k + rank))
+```json
+{
+  "use_rerank": false
+}
 ```
 
-检索结果会保留以下调试字段：
+## 5. Metadata Routing
 
-- `retrieval_strategy`
-- `retrievers`
-- `dense_rank`
-- `dense_score`
-- `bm25_rank`
-- `bm25_score`
-- `rrf_score`
+请求可以显式传入 metadata 过滤条件：
 
-### Metadata Routing
+- `course`
+- `category`
+- `source_name`
+- `page`
+- `modality`
+- `evidence_kind`
 
-routing 模块位于 `course_rag/app/rag/routing.py`，默认在 `/ask` 和 `/search` 中启用。
+系统也会从问题中识别课程、文件名、页码、图片/表格/题号等意图。高置信 metadata 会先尝试过滤；如果过滤后没有候选，会回退到原始候选，避免规则误判导致无结果。
 
-当前策略：
+图片、OCR、表格类问题不会强制只搜某一种 evidence，而是通过 routing 记录意图并做轻量加权。调试信息会返回：
 
-- 显式请求字段 `course`、`category`、`source_name`、`page`、`modality`、`evidence_kind` 使用严格 metadata filter。
-- 问题文本中高置信识别出的课程名、文件名、页码和期末试题类别会先尝试过滤；如果过滤后没有候选，则回退到原始 hybrid 候选。
-- 图片、表格、题号类意图会记录到 `routing.intents`，当前 text evidence 索引只做调试和轻量加权，不强行过滤到图片或表格。
-- routing 会返回 `candidate_count_before`、`candidate_count_after`、`applied_filters`、`filter_fallback` 等调试信息。
+- `candidate_count_before`
+- `candidate_count_after`
+- `applied_filters`
+- `filter_fallback`
+- `matched_intents`
 
-### 默认 Rerank 精排
+## 6. 上下文与生成
 
-rerank 模块位于 `course_rag/app/rag/rerank.py`，当前默认开启，可通过 `use_rerank=false` 关闭。
+检索命中的是 child chunk；默认生成时使用对应 parent 文档作为上下文，以减少 chunk 过碎导致的信息缺失。
 
-启用时流程为：
+上下文裁剪规则：
 
-```text
-RRF 候选结果
--> 取前 rerank_top_n 个 child chunk
--> 使用 cross-encoder 对 query + chunk 打分
--> 按 rerank_score 重排
--> 保留后续上下文选择流程
-```
+| 参数 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `max_context_chars` | 6000 | prompt 总上下文上限 |
+| `max_context_chars_per_source` | 1600 | 单个来源上下文上限 |
+| `min_chunk_chars` | 20 | 过短 chunk 过滤阈值 |
 
-当前默认模型是 `BAAI/bge-reranker-base`。该模型只在 `use_rerank=true` 时懒加载。默认 `rerank_local_files_only=true`，如果本地缓存没有模型，会保留原检索排序并返回 `rerank_error`，不会中断 `/ask` 或 `/search`。
-
-rerank 成功后，引用和检索调试字段会额外包含：
-
-- `pre_rerank_rank`
-- `pre_rerank_score`
-- `rerank_rank`
-- `rerank_score`
-- `rerank_model`
-
-## 4. 上下文选择
-
-检索返回的是子 chunk。生成前会进入上下文选择阶段：
-
-```text
-候选 chunk
--> 过滤过短文本
--> 按 parent_doc_id 去重
--> 选择 parent 文档或 child chunk
--> 生成 citation
-```
-
-当前默认使用父文档上下文：
-
-- 检索命中子 chunk。
-- 如果 `use_parent_context=true`，生成时使用对应 parent 文档。
-- citation 中仍保留命中 child chunk 的来源、页码、章节和 preview。
-
-## 5. 上下文裁剪
-
-上下文裁剪由 `trim_contexts()` 负责。
-
-当前限制：
-
-- 总上下文长度：`max_context_chars=6000`
-- 单个来源长度：`max_context_chars_per_source=1600`
-
-超过限制的文本会被截断后进入 prompt。
-
-## 6. Prompt 与生成
-
-生成模块使用 LangChain 调用兼容 OpenAI 接口的 DeepSeek 服务。
+`/ask` 默认会调用兼容 OpenAI 接口的 DeepSeek 服务：
 
 | 项 | 当前配置 |
 | --- | --- |
-| LLM provider | DeepSeek-compatible API |
+| provider | DeepSeek-compatible API |
 | 默认模型 | `deepseek-v4-pro` |
 | 默认 base URL | `https://api.deepseek.com` |
 | API key 环境变量 | `DEEPSEEK_API_KEY_RAGLEARN` |
 | temperature | 0.1 |
 | max_tokens | 1500 |
 
-Prompt 结构：
-
-```text
-system:
-  只根据给定课程资料回答。
-  资料不足时明确说明。
-  回答中使用 [1]、[2] 形式标注引用来源。
-
-human:
-  用户问题
-  检索资料
-  回答要求
-```
-
-如果 `use_llm=false`，系统不调用 LLM，直接返回检索片段。
-
-如果 LLM 调用失败，系统返回 retrieval-only fallback，并保留 `llm_error`。
+如果传 `use_llm=false`，系统只返回检索片段，不调用外部 LLM。LLM 调用失败时，也会返回 retrieval-only fallback，并保留 `llm_error`。
 
 ## 7. 返回结果
 
-`/ask` 返回：
+`/ask` 主要返回：
 
-- `question`
 - `answer`
 - `citations`
 - `retrieval`
-- `used_llm`
-- `llm_error`
-- `retrieval_strategy`
-- `retrievers`
-- `use_rerank`
-- `rerank_used`
-- `rerank_model`
-- `rerank_device`
-- `rerank_error`
 - `routing`
 - `pipeline`
 - `index`
+- `llm_error`
+- `rerank_error`
 
-`citations` 用于答案引用展示。
-
-`retrieval` 用于调试检索命中、上下文内容和融合分数。
-
-V2 text evidence 索引会额外返回以下可选字段：
+`citations` 用于答案引用展示，`retrieval` 用于调试检索命中。当前 citation 和 retrieval 会尽量保留以下 evidence 字段：
 
 - `evidence_id`
 - `source_doc_id`
@@ -368,10 +228,43 @@ V2 text evidence 索引会额外返回以下可选字段：
 - `evidence_kind`
 - `asset_path`
 - `parser_backend`
+- `source_name`
+- `page`
+- `section_path`
 - `context_before`
 - `context_after`
 
-## 当前 Pipeline
+回答中仍使用 `[1]`、`[2]` 形式引用资料。资料不足时，prompt 要求模型明确说明资料不足，而不是编造。
+
+## 8. 验证方式
+
+语法检查：
+
+```powershell
+.\rag\Scripts\python.exe -m compileall course_rag\app course_rag\eval
+```
+
+检索验证建议使用 `/search`，它本身不调用外部 LLM：
+
+```json
+{
+  "query": "FIRST FOLLOW 表格",
+  "top_k": 3,
+  "modality": "table"
+}
+```
+
+OCR 检索可用：
+
+```json
+{
+  "query": "状态图",
+  "top_k": 3,
+  "evidence_kind": "ocr_text"
+}
+```
+
+## 9. 当前 Pipeline
 
 默认 `strategy="hybrid"` 时：
 
@@ -384,7 +277,7 @@ load_vector_index
 -> metadata_route_query
 -> metadata_filter_candidates / metadata_filter_fallback
 -> metadata_boost_candidates
--> rerank_candidates（默认开启；use_rerank=false 时跳过）
+-> rerank_candidates
 -> filter_short_chunks
 -> deduplicate_by_parent
 -> assemble_context

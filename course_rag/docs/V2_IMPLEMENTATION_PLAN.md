@@ -2,7 +2,7 @@
 
 最后更新：2026-06-04
 
-本文档记录 `course_rag` V2 阶段增强功能的实施计划和完成状态。阶段 1-4 已进入当前默认索引；阶段 5-6 已完成主要代码接入，但 OCR 与 caption 仍是显式离线能力，当前默认索引未全量生成 OCR/caption evidence。
+本文档记录 `course_rag` V2 阶段增强功能的实施计划和完成状态。阶段 1-5 和阶段 7 已进入当前默认索引；阶段 6 VLM caption 保持默认关闭，不默认生成或索引 caption evidence。
 
 ## 1. 当前状态
 
@@ -33,7 +33,8 @@ LoadedDocument
 - API：`/ask`、`/search`、`/ingest`、`/health`。
 - 评测：已有 30 条文本 RAG 离线评测集。
 - V2 text evidence：已支持 `EvidenceDocument`、稳定 `evidence_id`、citation 扩展字段和默认 text evidence 索引。
-- V2 visual evidence：已支持独立图片、Markdown `image_refs`、RapidOCR OCR 缓存和可选 caption provider；当前默认索引已包含图片 metadata/image_ref，未包含 OCR/caption evidence。
+- V2 visual evidence：已支持独立图片、Markdown `image_refs`、RapidOCR OCR 缓存和可选 caption provider；当前默认索引已包含图片 metadata/image_ref 和 OCR evidence，未包含 caption evidence。
+- V2 table evidence：已支持 Docling JSON 表格优先、Markdown/PDF 类表格文本兜底的混合抽取策略。
 
 当前文本链路已经足够作为 V2 的稳定 baseline。V2 不应一开始就替换 embedding、迁移 Milvus 或重做所有模块，而应围绕当前真实缺口逐步增强。
 
@@ -41,15 +42,17 @@ LoadedDocument
 
 | 项 | 当前值 |
 | --- | --- |
-| 索引更新时间 | 2026-06-03 22:39:37 |
+| 索引更新时间 | 2026-06-04 09:55:42 |
 | priority 范围 | `mvp,v2` |
-| evidence 总数 | 4587 |
+| evidence 总数 | 5724 |
 | native_text evidence | 4243 |
 | image_metadata evidence | 177 |
 | image_ref evidence | 167 |
-| OCR / caption evidence | 0；代码已接入，未默认全量构建 |
-| chunk / parent 数量 | 7904 chunks / 4700 parents |
-| 来源文件数 | 261 |
+| OCR evidence | 998 |
+| table evidence | 139 |
+| caption evidence | 0；默认关闭 |
+| chunk / parent 数量 | 9138 chunks / 5840 parents |
+| 来源文件数 | 263 |
 
 本地环境约束：
 
@@ -65,7 +68,7 @@ LoadedDocument
 当前 `data_manifest_summary.json` 中，资料规模大致为：
 
 - `priority=mvp`：71 个资料，已进入当前 V2 evidence 索引。
-- `priority=v2`：192 个资料，当前已进入文本和图片 metadata/image_ref 索引层，但 OCR、caption、table 等高质量视觉/结构化 evidence 还未充分覆盖。
+- `priority=v2`：192 个资料，当前已进入文本、图片 metadata/image_ref、OCR 和 table evidence 索引层；caption 仍默认关闭。
 - `docling_image`：177 个，主要是图片、截图和图像型资料。
 - 文件级低文本 PDF：21 个，需要页级 OCR 或视觉理解；OCR 候选页不再只按整个文件判断。
 - 含图片引用的 Markdown：18 个，需要把正文上下文与图片 evidence 关联。
@@ -106,7 +109,7 @@ V2 推荐先引入统一证据层 `EvidenceDocument`，放在 loader 与 chunk/i
 -> 解析为 EvidenceDocument
 -> OCR / VLM caption / table markdown 缓存
 -> chunk
--> 文本索引：native_text + ocr_text + caption + table_markdown
+-> 文本索引：native_text + ocr_text + table_markdown + optional caption
 -> 后续可选视觉索引：page_image / image
 
 在线查询阶段
@@ -309,7 +312,7 @@ context_after
 - 仅靠文件名和 alt 文本召回效果有限。
 - 图片路径需要使用 repo-relative 路径，避免不同机器上绝对路径失效。
 
-### 阶段 5：OCR 接入与低文本 PDF 页级处理（代码已接入，未默认全量生成）
+### 阶段 5：OCR 接入与低文本 PDF 页级处理（已完成）
 
 目标：
 
@@ -336,8 +339,9 @@ context_after
 当前状态：
 
 - OCR provider、缓存、PDF 页级候选、API/CLI 参数已经接入。
-- 当前默认索引 `run_ocr=false`，没有 OCR evidence。
-- 下一步需要做小样本 OCR 检索验收，再决定是否分批生成全量 OCR 缓存。
+- 已完成 `mvp,v2` 范围 OCR 离线缓存构建，当前 `evidence_ocr.jsonl` 有 998 条 `ocr_text` evidence。
+- 默认重建 `run_ocr=false`，不会重新跑 OCR，但会读取已有 OCR 缓存并纳入索引。
+- OCR evidence 已能通过 `/search` 的 `evidence_kind="ocr_text"` 检索返回。
 
 风险：
 
@@ -347,7 +351,7 @@ context_after
 - `<80` 字符阈值是工程启发式：适合筛出封面、目录、扫描页、纯图页和题图页，但极短文本页不一定都需要 OCR，后续可结合图片/表格/版面特征继续收窄。
 - OCR 只能解决可见文字，不能充分理解图示结构。
 
-### 阶段 6：VLM caption 与视觉语义描述（可选 provider 已接入，未默认全量生成）
+### 阶段 6：VLM caption 与视觉语义描述（默认关闭）
 
 目标：
 
@@ -367,14 +371,15 @@ context_after
 验收标准：
 
 - 对典型流程图、页面截图、结构图应能生成可读 caption。
-- caption evidence 应可以被 `/search` 检索到。
+- 显式启用并重建 caption 后，caption evidence 应可以被 `/search` 检索到。
 - VLM 不可用时可以只保留 OCR 和图片 metadata。
 - 在线 `/ask` 不依赖 VLM 进程，也不会因 VLM 未安装而失败。
 
 当前状态：
 
 - caption provider 抽象和 `llama-cpp-cli` provider 已接入。
-- 当前默认索引 `run_caption=false`，没有 caption evidence。
+- 当前默认索引 `run_caption=false`、`caption_provider=none`，没有 caption evidence。
+- 默认重建不会读取旧 caption 缓存，也不会把 caption evidence 纳入索引。
 - 后续需要先配置 llama.cpp CLI、GGUF 和 mmproj 路径，再做小样本 caption 质量验证。
 
 风险：
@@ -384,7 +389,7 @@ context_after
 - 外部 VLM API 会产生网络调用和费用，需要用户确认。
 - caption 可能产生幻觉，必须保留原图 citation，不能只相信 caption。
 
-### 阶段 7：table evidence
+### 阶段 7：table evidence（已完成）
 
 目标：
 
@@ -392,16 +397,23 @@ context_after
 
 主要改动点：
 
-- 优先复用 Docling 的 table structure。
-- 小表整表转 Markdown 入库。
-- 大表按行组切分，但每个 chunk 保留表头。
-- table evidence 保留页码、原始 source、表格序号和上下文。
+- 已新增 `course_rag/app/rag/table_evidence.py`。
+- 已新增 `course_rag/data/processed/evidence_table.jsonl`。
+- 当前采用混合抽取策略：优先复用 Docling JSON 的 table structure；缺失时从 Markdown 表格和 PDF 类表格文本保守兜底。
+- 小表整表转 Markdown 入库；大表按最多 20 行切分，每个 evidence 保留表头。
+- table evidence 保留页码、原始 source、表格序号、切片序号和上下文。
 
 验收标准：
 
 - 表格 evidence 可独立检索。
 - citation 能标出表格所在 source/page。
 - 表格内容不会被普通 chunk 切碎到失去表头。
+
+当前状态：
+
+- 当前 `evidence_table.jsonl` 有 139 条 `table_markdown` evidence。
+- 其中 `docling_table` 5 条，`text_table_heuristic` 134 条。
+- table evidence 已能通过 `/search` 的 `modality="table"` 检索返回。
 
 风险：
 
@@ -464,8 +476,10 @@ context_after
 
 - 阶段 1-3 已完成并稳定进入在线主链路。
 - 阶段 4 已完成并进入默认索引，当前已有 177 条 `image_metadata` 和 167 条 `image_ref`。
-- 阶段 5-6 已完成主要代码接入，但当前默认索引没有 OCR/caption evidence，仍处在离线能力待验收阶段。
-- 阶段 7 table evidence、阶段 8 V2 评测集扩展、阶段 9 Milvus/视觉检索实验尚未开始。
+- 阶段 5 已完成 OCR 缓存构建并进入默认索引，当前已有 998 条 `ocr_text`。
+- 阶段 6 caption provider 已接入但默认关闭，当前索引没有 caption evidence。
+- 阶段 7 已完成 table evidence 并进入默认索引，当前已有 139 条 `table_markdown`。
+- 阶段 8 V2 评测集扩展、阶段 9 Milvus/视觉检索实验尚未开始。
 
 近期不建议优先做：
 
@@ -477,14 +491,13 @@ context_after
 
 近期建议优先做：
 
-1. 对 RapidOCR 做小样本检索验收，确认截图和低文本 PDF 页能被正确召回。
-2. 分批生成 OCR 缓存，避免一次性全量 OCR 占用过长时间。
-3. 补 table evidence，优先处理课件和试卷中的表格结构。
-4. 扩展 V2 评测集，覆盖图片、OCR、表格、指定页码和题号类问题。
-5. 配置并小样本验证 `Qwen3-VL-2B-Instruct-GGUF` caption；质量稳定后再考虑批量 caption。
-6. 等 evidence 质量稳定后，再做 Milvus 和视觉检索实验。
+1. 扩展 V2 评测集，覆盖图片、OCR、表格、指定页码和题号类问题。
+2. 抽样检查 OCR/table evidence 的质量，清理明显误抽或低价值 evidence。
+3. 根据评测结果调整 table 文本启发式规则和 OCR 页级阈值。
+4. 如确实需要视觉语义理解，再配置并小样本验证 `Qwen3-VL-2B-Instruct-GGUF` caption。
+5. 等 evidence 质量稳定后，再做 Milvus 和视觉检索实验。
 
-这样可以先把已经进入索引的视觉 metadata 转化为真正可回答的 OCR/table/caption evidence，再考虑更复杂的索引后端和视觉检索。
+这样可以先把已经进入索引的 OCR/table evidence 做成可评测、可迭代的稳定能力，再考虑更复杂的索引后端和视觉检索。
 
 ## 6. 验证规则
 
