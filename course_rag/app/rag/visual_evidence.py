@@ -617,19 +617,24 @@ def build_ocr_evidence(
                 text, lines = text_cache[asset_key]
                 if not text.strip():
                     continue
-                selected.append(
-                    ocr_target_to_evidence(
-                        target,
-                        text=text,
-                        lines=lines,
-                        provider_name=provider_name,
-                        pipeline_version=pipeline_version,
-                    )
+                evidence = ocr_target_to_evidence(
+                    target,
+                    text=text,
+                    lines=lines,
+                    provider_name=provider_name,
+                    pipeline_version=pipeline_version,
                 )
+                selected.append(evidence)
+                cached[str(evidence.metadata.get("cache_key"))] = evidence
+                if write_cache:
+                    write_evidence_jsonl(
+                        cache_path,
+                        dedupe_evidence_by_id(cached.values()),
+                    )
 
     deduped = dedupe_evidence_by_id(selected)
     if write_cache and run_ocr:
-        write_evidence_jsonl(cache_path, deduped)
+        write_evidence_jsonl(cache_path, dedupe_evidence_by_id(cached.values()))
     return deduped
 
 
@@ -648,9 +653,9 @@ def build_caption_evidence(
     materialized_targets = list(targets)
     if max_items is not None:
         materialized_targets = materialized_targets[:max_items]
-    cached = cached_evidence_by_key(cache_path)
     if not run_caption:
-        return dedupe_evidence_by_id(cached.values())
+        return []
+    cached = cached_evidence_by_key(cache_path)
 
     target_keys = {caption_cache_key(target, provider_name, pipeline_version) for target in materialized_targets}
     selected = [cached[key] for key in target_keys if key in cached]
