@@ -35,6 +35,17 @@ try:
         load_documents,
         parse_strategy_arg,
     )
+    from .visual_evidence import (
+        DEFAULT_CAPTION_EVIDENCE_CACHE_PATH,
+        DEFAULT_CAPTION_PROVIDER,
+        DEFAULT_IMAGE_EVIDENCE_CACHE_PATH,
+        DEFAULT_OCR_EVIDENCE_CACHE_PATH,
+        DEFAULT_OCR_PROVIDER,
+        DEFAULT_PAGE_IMAGE_ROOT,
+        DEFAULT_PDF_PAGE_LOW_TEXT_CHARS,
+        VisualEvidenceConfig,
+        build_visual_evidence,
+    )
 except ImportError:
     from evidence import (  # type: ignore
         DEFAULT_TEXT_EVIDENCE_CACHE_PATH,
@@ -55,6 +66,17 @@ except ImportError:
         load_documents,
         parse_strategy_arg,
     )
+    from visual_evidence import (  # type: ignore
+        DEFAULT_CAPTION_EVIDENCE_CACHE_PATH,
+        DEFAULT_CAPTION_PROVIDER,
+        DEFAULT_IMAGE_EVIDENCE_CACHE_PATH,
+        DEFAULT_OCR_EVIDENCE_CACHE_PATH,
+        DEFAULT_OCR_PROVIDER,
+        DEFAULT_PAGE_IMAGE_ROOT,
+        DEFAULT_PDF_PAGE_LOW_TEXT_CHARS,
+        VisualEvidenceConfig,
+        build_visual_evidence,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +85,7 @@ COURSE_RAG_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = COURSE_RAG_ROOT.parent
 DEFAULT_INDEX_DIR = COURSE_RAG_ROOT / "vector_index_v2_text"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
+DEFAULT_COMBINED_EVIDENCE_CACHE_PATH = Path("course_rag/data/processed/evidence_v2.jsonl")
 INDEX_FILE_NAME = "index.faiss"
 CHUNKS_FILE_NAME = "chunks.jsonl"
 PARENTS_FILE_NAME = "parents.jsonl"
@@ -143,7 +166,7 @@ def build_or_load_vector_index(
     index_dir: Path = DEFAULT_INDEX_DIR,
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     manifest_path: Path = REPO_ROOT / LOADER_DEFAULT_MANIFEST_PATH,
-    priority: str = "mvp",
+    priority: str = "mvp,v2",
     strategies: str = "supported",
     backend: str = "auto",
     limit: int | None = None,
@@ -158,6 +181,16 @@ def build_or_load_vector_index(
     evidence_cache_path: Path | None = None,
     evidence_pipeline_version: str = DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
     write_evidence_cache: bool = True,
+    include_visual_evidence: bool = True,
+    combined_evidence_cache_path: Path | None = None,
+    run_ocr: bool = False,
+    ocr_provider: str = DEFAULT_OCR_PROVIDER,
+    run_caption: bool = False,
+    caption_provider: str = DEFAULT_CAPTION_PROVIDER,
+    visual_limit: int | None = None,
+    ocr_max_pdf_pages: int | None = None,
+    pdf_page_low_text_chars: int = DEFAULT_PDF_PAGE_LOW_TEXT_CHARS,
+    caption_max_items: int | None = None,
 ) -> CourseVectorIndex:
     """Load an existing FAISS index or build one from the current corpus."""
 
@@ -190,6 +223,16 @@ def build_or_load_vector_index(
         evidence_cache_path=evidence_cache_path,
         evidence_pipeline_version=evidence_pipeline_version,
         write_evidence_cache=write_evidence_cache,
+        include_visual_evidence=include_visual_evidence,
+        combined_evidence_cache_path=combined_evidence_cache_path,
+        run_ocr=run_ocr,
+        ocr_provider=ocr_provider,
+        run_caption=run_caption,
+        caption_provider=caption_provider,
+        visual_limit=visual_limit,
+        ocr_max_pdf_pages=ocr_max_pdf_pages,
+        pdf_page_low_text_chars=pdf_page_low_text_chars,
+        caption_max_items=caption_max_items,
     )
 
 
@@ -213,33 +256,81 @@ def build_vector_index(
     evidence_cache_path: Path | None,
     evidence_pipeline_version: str,
     write_evidence_cache: bool,
+    include_visual_evidence: bool,
+    combined_evidence_cache_path: Path | None,
+    run_ocr: bool,
+    ocr_provider: str,
+    run_caption: bool,
+    caption_provider: str,
+    visual_limit: int | None,
+    ocr_max_pdf_pages: int | None,
+    pdf_page_low_text_chars: int,
+    caption_max_items: int | None,
 ) -> CourseVectorIndex:
     """Build a new FAISS index and persist it to disk."""
 
     logger.info("Loading documents from manifest: %s", manifest_path)
+    selected_strategies = parse_strategy_arg(strategies)
+    text_strategies = set(selected_strategies)
+    if include_visual_evidence:
+        text_strategies.discard("docling_image")
     documents = load_documents(
         manifest_path=manifest_path,
         repo_root=REPO_ROOT,
         priority=priority,
-        strategies=parse_strategy_arg(strategies),
+        strategies=text_strategies,
         limit=limit,
         backend=backend,
         strict=strict,
+        skip_low_text_pdfs=include_visual_evidence,
     )
     evidence_stats: dict[str, Any] | None = None
-    resolved_evidence_cache_path: Path | None = None
+    visual_stats: dict[str, Any] | None = None
+    resolved_text_evidence_cache_path: Path | None = None
+    resolved_combined_evidence_cache_path: Path | None = None
     if use_evidence:
         evidence_documents = loaded_documents_to_text_evidence(
             documents,
             pipeline_version=evidence_pipeline_version,
         )
-        evidence_stats = summarize_evidence(evidence_documents)
-        resolved_evidence_cache_path = resolve_path(
+        resolved_text_evidence_cache_path = resolve_path(
             evidence_cache_path or DEFAULT_TEXT_EVIDENCE_CACHE_PATH
         )
         if write_evidence_cache:
-            write_evidence_jsonl(resolved_evidence_cache_path, evidence_documents)
-            logger.info("Saved text evidence cache to %s", resolved_evidence_cache_path)
+            write_evidence_jsonl(resolved_text_evidence_cache_path, evidence_documents)
+            logger.info("Saved text evidence cache to %s", resolved_text_evidence_cache_path)
+
+        if include_visual_evidence:
+            visual_result = build_visual_evidence(
+                VisualEvidenceConfig(
+                    manifest_path=manifest_path,
+                    repo_root=REPO_ROOT,
+                    priority=priority,
+                    run_ocr=run_ocr,
+                    ocr_provider=ocr_provider,
+                    run_caption=run_caption,
+                    caption_provider=caption_provider,
+                    image_cache_path=DEFAULT_IMAGE_EVIDENCE_CACHE_PATH,
+                    ocr_cache_path=DEFAULT_OCR_EVIDENCE_CACHE_PATH,
+                    caption_cache_path=DEFAULT_CAPTION_EVIDENCE_CACHE_PATH,
+                    page_image_root=DEFAULT_PAGE_IMAGE_ROOT,
+                    visual_limit=visual_limit,
+                    ocr_max_pdf_pages=ocr_max_pdf_pages,
+                    pdf_page_low_text_chars=pdf_page_low_text_chars,
+                    caption_max_items=caption_max_items,
+                    write_caches=write_evidence_cache,
+                )
+            )
+            evidence_documents.extend(visual_result.evidence_documents)
+            visual_stats = visual_result.stats
+
+        evidence_stats = summarize_evidence(evidence_documents)
+        resolved_combined_evidence_cache_path = resolve_path(
+            combined_evidence_cache_path or DEFAULT_COMBINED_EVIDENCE_CACHE_PATH
+        )
+        if write_evidence_cache:
+            write_evidence_jsonl(resolved_combined_evidence_cache_path, evidence_documents)
+            logger.info("Saved combined evidence cache to %s", resolved_combined_evidence_cache_path)
         documents = evidence_to_loaded_documents(evidence_documents)
 
     config = ChunkingConfig(
@@ -275,11 +366,24 @@ def build_vector_index(
         "backend": backend,
         "limit": limit,
         "use_evidence": use_evidence,
-        "evidence_cache_path": safe_repo_relative(resolved_evidence_cache_path)
-        if resolved_evidence_cache_path is not None
+        "include_visual_evidence": include_visual_evidence,
+        "run_ocr": run_ocr,
+        "ocr_provider": ocr_provider if include_visual_evidence else None,
+        "run_caption": run_caption,
+        "caption_provider": caption_provider if include_visual_evidence else None,
+        "visual_limit": visual_limit,
+        "ocr_max_pdf_pages": ocr_max_pdf_pages,
+        "pdf_page_low_text_chars": pdf_page_low_text_chars if include_visual_evidence else None,
+        "caption_max_items": caption_max_items,
+        "evidence_cache_path": safe_repo_relative(resolved_combined_evidence_cache_path)
+        if resolved_combined_evidence_cache_path is not None
+        else None,
+        "text_evidence_cache_path": safe_repo_relative(resolved_text_evidence_cache_path)
+        if resolved_text_evidence_cache_path is not None
         else None,
         "evidence_pipeline_version": evidence_pipeline_version if use_evidence else None,
         "evidence_stats": evidence_stats,
+        "visual_evidence_stats": visual_stats,
         "chunking_config": asdict(config),
         "chunk_stats": chunking_result.stats,
     }
@@ -463,8 +567,10 @@ def summarize_vector_index(vector_index: CourseVectorIndex, index_dir: Path) -> 
         "embedding_model": vector_index.metadata.get("embedding_model"),
         "embedding_dimension": vector_index.metadata.get("embedding_dimension"),
         "use_evidence": vector_index.metadata.get("use_evidence", False),
+        "include_visual_evidence": vector_index.metadata.get("include_visual_evidence", False),
         "evidence_cache_path": vector_index.metadata.get("evidence_cache_path"),
         "evidence_pipeline_version": vector_index.metadata.get("evidence_pipeline_version"),
+        "visual_evidence_stats": vector_index.metadata.get("visual_evidence_stats"),
         "source_files": stats.get("source_files"),
         "chunks": stats.get("chunks"),
         "parents": stats.get("parents"),
@@ -547,7 +653,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
     parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--manifest", type=Path, default=REPO_ROOT / LOADER_DEFAULT_MANIFEST_PATH)
-    parser.add_argument("--priority", default="mvp")
+    parser.add_argument("--priority", default="mvp,v2")
     parser.add_argument("--strategies", default="supported")
     parser.add_argument("--backend", choices=["auto", "docling", "basic"], default="auto")
     parser.add_argument("--limit", type=int, default=None)
@@ -577,6 +683,61 @@ def parse_args() -> argparse.Namespace:
         "--no-evidence-cache",
         action="store_true",
         help="Do not write the generated evidence JSONL cache.",
+    )
+    parser.add_argument(
+        "--combined-evidence-cache",
+        type=Path,
+        default=DEFAULT_COMBINED_EVIDENCE_CACHE_PATH,
+        help="JSONL cache path for combined text/image/OCR/caption evidence.",
+    )
+    parser.add_argument(
+        "--no-visual-evidence",
+        action="store_true",
+        help="Disable V2 image, OCR, and caption evidence when rebuilding.",
+    )
+    parser.add_argument(
+        "--run-ocr",
+        action="store_true",
+        help="Run offline OCR for missing visual targets before rebuilding the index.",
+    )
+    parser.add_argument(
+        "--ocr-provider",
+        default=DEFAULT_OCR_PROVIDER,
+        help="Offline OCR provider. Default uses the installed RapidOCR runtime.",
+    )
+    parser.add_argument(
+        "--run-caption",
+        action="store_true",
+        help="Run optional offline VLM caption generation for missing visual targets.",
+    )
+    parser.add_argument(
+        "--caption-provider",
+        default=DEFAULT_CAPTION_PROVIDER,
+        help="Offline caption provider. Use llama-cpp-cli when configured.",
+    )
+    parser.add_argument(
+        "--visual-limit",
+        type=int,
+        default=None,
+        help="Optional limit for image metadata and visual targets, useful for smoke tests.",
+    )
+    parser.add_argument(
+        "--ocr-max-pdf-pages",
+        type=int,
+        default=None,
+        help="Optional per-PDF page profile/render limit for PDF OCR smoke tests.",
+    )
+    parser.add_argument(
+        "--pdf-page-low-text-chars",
+        type=int,
+        default=DEFAULT_PDF_PAGE_LOW_TEXT_CHARS,
+        help="Per-page text-layer character threshold for PDF OCR candidates.",
+    )
+    parser.add_argument(
+        "--caption-max-items",
+        type=int,
+        default=None,
+        help="Optional caption item limit for VLM smoke tests.",
     )
     parser.add_argument(
         "--no-progress",
@@ -609,6 +770,16 @@ def main() -> None:
         evidence_cache_path=args.evidence_cache,
         evidence_pipeline_version=args.evidence_pipeline_version,
         write_evidence_cache=not args.no_evidence_cache,
+        include_visual_evidence=not args.no_visual_evidence,
+        combined_evidence_cache_path=args.combined_evidence_cache,
+        run_ocr=args.run_ocr,
+        ocr_provider=args.ocr_provider,
+        run_caption=args.run_caption,
+        caption_provider=args.caption_provider,
+        visual_limit=args.visual_limit,
+        ocr_max_pdf_pages=args.ocr_max_pdf_pages,
+        pdf_page_low_text_chars=args.pdf_page_low_text_chars,
+        caption_max_items=args.caption_max_items,
     )
 
     print(

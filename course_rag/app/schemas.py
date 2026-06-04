@@ -154,6 +154,16 @@ class SearchResponse(BaseModel):
 
 class IngestRequest(BaseModel):
     rebuild: bool = False
+    priority: str = "mvp,v2"
+    include_visual_evidence: bool = True
+    run_ocr: bool = False
+    ocr_provider: str = "rapidocr"
+    run_caption: bool = False
+    caption_provider: str = "none"
+    visual_limit: int | None = Field(default=None, ge=1)
+    ocr_max_pdf_pages: int | None = Field(default=None, ge=1)
+    pdf_page_low_text_chars: int = Field(default=80, ge=0)
+    caption_max_items: int | None = Field(default=None, ge=1)
 
 
 class IngestResponse(BaseModel):

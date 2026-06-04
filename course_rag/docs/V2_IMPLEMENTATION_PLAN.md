@@ -1,8 +1,8 @@
 # Course RAG V2 实施计划
 
-最后更新：2026-06-02
+最后更新：2026-06-04
 
-本文档记录 `course_rag` V2 阶段增强功能的实施计划和完成状态。阶段 1/2 已完成，当前默认进入 V2 text evidence 文本链路。
+本文档记录 `course_rag` V2 阶段增强功能的实施计划和完成状态。阶段 1-4 已进入当前默认索引；阶段 5-6 已完成主要代码接入，但 OCR 与 caption 仍是显式离线能力，当前默认索引未全量生成 OCR/caption evidence。
 
 ## 1. 当前状态
 
@@ -13,6 +13,7 @@
 ```text
 LoadedDocument
 -> EvidenceDocument(text/native_text)
+-> Image evidence / OCR evidence / optional caption evidence
 -> ParentDocument / ChunkedDocument
 -> BAAI/bge-small-zh-v1.5 + FAISS
 -> BM25 hybrid + RRF
@@ -32,25 +33,41 @@ LoadedDocument
 - API：`/ask`、`/search`、`/ingest`、`/health`。
 - 评测：已有 30 条文本 RAG 离线评测集。
 - V2 text evidence：已支持 `EvidenceDocument`、稳定 `evidence_id`、citation 扩展字段和默认 text evidence 索引。
+- V2 visual evidence：已支持独立图片、Markdown `image_refs`、RapidOCR OCR 缓存和可选 caption provider；当前默认索引已包含图片 metadata/image_ref，未包含 OCR/caption evidence。
 
 当前文本链路已经足够作为 V2 的稳定 baseline。V2 不应一开始就替换 embedding、迁移 Milvus 或重做所有模块，而应围绕当前真实缺口逐步增强。
+
+当前已构建索引的实际状态：
+
+| 项 | 当前值 |
+| --- | --- |
+| 索引更新时间 | 2026-06-03 22:39:37 |
+| priority 范围 | `mvp,v2` |
+| evidence 总数 | 4587 |
+| native_text evidence | 4243 |
+| image_metadata evidence | 177 |
+| image_ref evidence | 167 |
+| OCR / caption evidence | 0；代码已接入，未默认全量构建 |
+| chunk / parent 数量 | 7904 chunks / 4700 parents |
+| 来源文件数 | 261 |
 
 本地环境约束：
 
 - GPU：NVIDIA GeForce RTX 3050 Laptop GPU，显存 4GB。
 - 当前已缓存模型：`BAAI/bge-small-zh-v1.5`、`BAAI/bge-reranker-base`、Docling 相关模型。
 - 已下载 V2 候选模型：`Qwen/Qwen3-VL-2B-Instruct-GGUF` Q4 GGUF 与 mmproj，以及 `PP-OCRv5_mobile_det`、`PP-OCRv5_mobile_rec`。
-- 当前只完成模型文件下载，尚未安装 OCR/VLM 运行时依赖。
+- OCR 默认使用当前虚拟环境已安装的 RapidOCR；PP-OCRv5 Paddle 模型后续作为可选 provider。
+- VLM caption provider 已作为可选离线能力接入；当前未把 VLM 作为在线问答依赖。
 - 由于显存较小，V2 不应把 VLM 放到在线 `/ask` 主链路中实时推理，应优先作为离线证据构建工具。
 
 ## 2. V2 主要缺口
 
 当前 `data_manifest_summary.json` 中，资料规模大致为：
 
-- `priority=mvp`：71 个资料，已进入当前 V2 text evidence 文本索引。
-- `priority=v2`：192 个资料，尚未充分进入有效 RAG。
+- `priority=mvp`：71 个资料，已进入当前 V2 evidence 索引。
+- `priority=v2`：192 个资料，当前已进入文本和图片 metadata/image_ref 索引层，但 OCR、caption、table 等高质量视觉/结构化 evidence 还未充分覆盖。
 - `docling_image`：177 个，主要是图片、截图和图像型资料。
-- 低文本 PDF：21 个，需要页级 OCR 或视觉理解。
+- 文件级低文本 PDF：21 个，需要页级 OCR 或视觉理解；OCR 候选页不再只按整个文件判断。
 - 含图片引用的 Markdown：18 个，需要把正文上下文与图片 evidence 关联。
 
 因此 V2 的核心问题不是“文本检索模型不够强”，而是大量课程资料还没有被抽取成可检索、可引用、可追溯的证据。
@@ -154,7 +171,7 @@ pipeline_version
 
 - 普通文本、Markdown 正文、文本层 PDF、DOCX：生成 `modality=text`、`evidence_kind=native_text`，继续沿用当前 parent-child chunk、dense + BM25 + rerank 流程。
 - Markdown 内置图片：Markdown 正文生成 text evidence；`image_refs` 单独生成 image evidence，绑定所在 `section_path`、相邻正文和 `asset_path`；后续为该图片补 OCR evidence 和 caption evidence。
-- 低文本 PDF / 扫描 PDF：按页渲染为 page image，生成 `modality=pdf_page` evidence；页面 OCR 生成 `evidence_kind=ocr_text`，页面说明生成 `evidence_kind=caption/layout_text`，表格另生成 table evidence。
+- PDF 扫描页 / 低文本页：启用 OCR 或 caption 后按页检查文本层；文件级低文本 PDF 的已扫描页面全量作为候选页，普通文本层 PDF 只把低于阈值的单页作为候选页；候选页渲染为 page image 后生成 OCR/caption/table evidence。
 - 独立 PNG/JPG 截图：生成 `modality=image` evidence，先保存路径、文件名和上下文；后续补 OCR 与 VLM caption。
 - 表格：生成 `modality=table`、`evidence_kind=table_markdown`，小表整表入库，大表按行组切分并保留表头。
 
@@ -265,7 +282,7 @@ context_after
 - 规则过强可能误过滤相关资料。
 - 文件名匹配需要处理中文、空格、全角符号和部分文件名输入。
 
-### 阶段 4：图片 evidence 与 Markdown image_refs
+### 阶段 4：图片 evidence 与 Markdown image_refs（已完成）
 
 目标：
 
@@ -274,11 +291,11 @@ context_after
 
 主要改动点：
 
-- 为 `docling_image` 资料生成 image evidence。
-- 解析 Markdown `image_refs`，把图片与所在章节上下文绑定。
-- `asset_path` 指向本地图片或渲染出的页图路径。
-- 图片 evidence 的 `page_content` 初期可由 alt 文本、文件名、相邻正文组成。
-- 后续同一图片可派生 OCR evidence 和 caption evidence，并通过相同 `asset_path` 或 `source_doc_id` 关联。
+- 已为 `docling_image` 资料生成 `image/image_metadata` evidence。
+- 已解析 Markdown `image_refs`，把图片与所在章节上下文绑定为 `image/image_ref` evidence。
+- `asset_path` 使用 repo-relative 路径，避免不同机器上的绝对路径失效。
+- 图片 evidence 的 `page_content` 由 alt 文本、文件名、课程分类和相邻正文组成。
+- 同一图片可派生 OCR evidence 和 caption evidence，并通过相同 `asset_path` 或 `source_doc_id` 关联。
 
 验收标准：
 
@@ -292,35 +309,45 @@ context_after
 - 仅靠文件名和 alt 文本召回效果有限。
 - 图片路径需要使用 repo-relative 路径，避免不同机器上绝对路径失效。
 
-### 阶段 5：OCR 接入与低文本 PDF 页级处理
+### 阶段 5：OCR 接入与低文本 PDF 页级处理（代码已接入，未默认全量生成）
 
 目标：
 
 - 解决“图片里写了什么”和“扫描页文字无法检索”的问题。
-- 先处理截图、独立图片和低文本 PDF 页图。
+- 先处理截图、独立图片、文件级低文本 PDF 和普通 PDF 中的低文本单页。
 
 主要改动点：
 
-- 接入本地 OCR provider，优先使用已下载的 `PP-OCRv5_mobile_det` 和 `PP-OCRv5_mobile_rec`。
-- 低文本 PDF 按页渲染为图片，再生成 OCR evidence。
+- 已接入本地 OCR provider，默认使用当前虚拟环境中可直接运行的 RapidOCR。
+- 已支持 PDF 页级候选判断：文件级低文本 PDF 的已扫描页面全量进入候选；普通文本层 PDF 只选择单页文本字符数低于阈值的页面。
+- 当前默认页级阈值是去空白后 `<80` 个字符，可通过 `--pdf-page-low-text-chars` 或 `/ingest.pdf_page_low_text_chars` 调整。
+- 候选页才会用 `pypdfium2` 渲染为图片，再生成 OCR evidence；默认不运行 OCR/caption 时不会扫描和渲染 PDF 页。
 - OCR 结果作为 `evidence_kind=ocr_text` 进入文本索引。
-- OCR 输出需要缓存，避免每次重建索引重复跑模型。
-- 低文本 PDF 的页图路径写入 `asset_path`，citation 同时保留原 PDF 的 `source_name` 和 `page`。
+- OCR 输出写入 `course_rag/data/processed/evidence_ocr.jsonl`，避免每次重建索引重复跑模型。
+- PDF 页图路径写入 `asset_path`，citation 同时保留原 PDF 的 `source_name`、`page`、`pdf_page_text_chars` 和低文本原因。
+- 已下载的 `PP-OCRv5_mobile_det` 和 `PP-OCRv5_mobile_rec` 暂作为后续可选 provider，不作为当前默认阻塞项。
 
 验收标准：
 
-- 典型截图和扫描页能抽取可检索文字。
-- OCR evidence 能返回 `source + page` 或 `asset_path`。
+- 典型截图和扫描页应能抽取可检索文字。
+- OCR evidence 应能返回 `source + page` 或 `asset_path`。
 - OCR provider 不可用时，系统能跳过并记录错误，不影响文本索引。
+
+当前状态：
+
+- OCR provider、缓存、PDF 页级候选、API/CLI 参数已经接入。
+- 当前默认索引 `run_ocr=false`，没有 OCR evidence。
+- 下一步需要做小样本 OCR 检索验收，再决定是否分批生成全量 OCR 缓存。
 
 风险：
 
-- OCR 模型下载和 CPU 推理耗时较高。
+- OCR 模型下载和 CPU 推理耗时较高；全量 OCR 缓存构建应作为离线任务执行。
 - 当前只下载了 PP-OCRv5 模型文件，后续仍需安装 PaddleOCR / PaddlePaddle 等运行时。
 - 课件截图、公式、流程图中的文字可能识别不稳定。
+- `<80` 字符阈值是工程启发式：适合筛出封面、目录、扫描页、纯图页和题图页，但极短文本页不一定都需要 OCR，后续可结合图片/表格/版面特征继续收窄。
 - OCR 只能解决可见文字，不能充分理解图示结构。
 
-### 阶段 6：VLM caption 与视觉语义描述
+### 阶段 6：VLM caption 与视觉语义描述（可选 provider 已接入，未默认全量生成）
 
 目标：
 
@@ -329,20 +356,26 @@ context_after
 
 主要改动点：
 
-- 增加 VLM caption provider 抽象。
-- 本地默认优先试验已下载的 `Qwen/Qwen3-VL-2B-Instruct-GGUF` Q4 量化版本。
-- 对图片、页面图、流程图、状态图生成结构化中文说明。
+- 已增加 VLM caption provider 抽象。
+- 本地优先使用已下载的 `Qwen/Qwen3-VL-2B-Instruct-GGUF` Q4 量化版本，但 caption 只作为离线可选批处理。
 - caption 作为 `evidence_kind=caption` 进入文本索引。
 - 保留原图路径，后续多模态生成时可把图片一起传入模型。
-- 生成结果写入缓存；同一 `source_hash` 和 `pipeline_version` 命中时不重复推理。
+- 生成结果写入 `course_rag/data/processed/evidence_caption.jsonl`；同一 `source_hash`、provider 和 `pipeline_version` 命中时不重复推理。
 - VLM 不可用时跳过 caption，仅保留 image metadata 和 OCR evidence。
+- 在线 `/ask` 与 `/search` 不实时生成 caption，只检索已经写入缓存并重建进索引的 caption evidence。
 
 验收标准：
 
-- 对典型流程图、页面截图、结构图能生成可读 caption。
-- caption evidence 可以被 `/search` 检索到。
+- 对典型流程图、页面截图、结构图应能生成可读 caption。
+- caption evidence 应可以被 `/search` 检索到。
 - VLM 不可用时可以只保留 OCR 和图片 metadata。
 - 在线 `/ask` 不依赖 VLM 进程，也不会因 VLM 未安装而失败。
+
+当前状态：
+
+- caption provider 抽象和 `llama-cpp-cli` provider 已接入。
+- 当前默认索引 `run_caption=false`，没有 caption evidence。
+- 后续需要先配置 llama.cpp CLI、GGUF 和 mmproj 路径，再做小样本 caption 质量验证。
 
 风险：
 
@@ -427,6 +460,13 @@ context_after
 
 ## 5. 近期优先级
 
+当前完成度判断：
+
+- 阶段 1-3 已完成并稳定进入在线主链路。
+- 阶段 4 已完成并进入默认索引，当前已有 177 条 `image_metadata` 和 167 条 `image_ref`。
+- 阶段 5-6 已完成主要代码接入，但当前默认索引没有 OCR/caption evidence，仍处在离线能力待验收阶段。
+- 阶段 7 table evidence、阶段 8 V2 评测集扩展、阶段 9 Milvus/视觉检索实验尚未开始。
+
 近期不建议优先做：
 
 - 直接替换 `BAAI/bge-small-zh-v1.5`。
@@ -437,14 +477,14 @@ context_after
 
 近期建议优先做：
 
-1. `EvidenceDocument` 与 citation 字段规划。（已完成）
-2. 现有文本链路兼容迁移到 evidence 层，并切换为默认文本索引。（已完成）
-3. metadata routing 与课程/文件/页码过滤。（已完成）
-4. 图片 evidence 与 Markdown image_refs。（下一步）
-5. OCR 缓存化接入。
-6. 用已下载的 `Qwen3-VL-2B-Instruct-GGUF` 作为离线 caption 生成器做小样本验证。
+1. 对 RapidOCR 做小样本检索验收，确认截图和低文本 PDF 页能被正确召回。
+2. 分批生成 OCR 缓存，避免一次性全量 OCR 占用过长时间。
+3. 补 table evidence，优先处理课件和试卷中的表格结构。
+4. 扩展 V2 评测集，覆盖图片、OCR、表格、指定页码和题号类问题。
+5. 配置并小样本验证 `Qwen3-VL-2B-Instruct-GGUF` caption；质量稳定后再考虑批量 caption。
+6. 等 evidence 质量稳定后，再做 Milvus 和视觉检索实验。
 
-这样可以先增强当前文本 evidence 的可控检索，再逐步扩大图片、OCR 和 VLM caption 的资料覆盖面。
+这样可以先把已经进入索引的视觉 metadata 转化为真正可回答的 OCR/table/caption evidence，再考虑更复杂的索引后端和视觉检索。
 
 ## 6. 验证规则
 
@@ -472,5 +512,5 @@ context_after
 ```
 
 - 避免默认真实调用外部 LLM、OCR/VLM API、下载模型或安装依赖。
-- V2 候选 OCR/VLM 模型文件已下载，但运行 OCR/VLM 仍需要后续安装或接入对应推理运行时。
+- V2 候选 OCR/VLM 模型文件已下载；OCR 默认可用 RapidOCR，VLM caption 仍需要按需安装或配置 llama.cpp 运行时。
 - 如果必须下载模型、安装依赖、启动 Milvus 或调用外部 API，需要先说明影响并等待确认。
