@@ -24,20 +24,12 @@ const askSettings = computed(() => props.settings as AskFormState);
     </summary>
 
     <div class="field-grid">
-      <label class="field">
-        <span>index_backend</span>
-        <select v-model="settings.index_backend">
-          <option value="milvus">milvus</option>
-          <option value="faiss">faiss</option>
-        </select>
-      </label>
-
-      <label v-if="settings.index_backend === 'milvus'" class="field field--wide">
+      <label class="field field--wide">
         <span>milvus_uri</span>
         <input v-model="settings.milvus_uri" type="text" />
       </label>
 
-      <label v-if="settings.index_backend === 'milvus'" class="field field--wide">
+      <label class="field field--wide">
         <span>milvus_collection</span>
         <input v-model="settings.milvus_collection" type="text" />
       </label>

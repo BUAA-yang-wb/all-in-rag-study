@@ -1,5 +1,4 @@
 export type RetrievalStrategy = "hybrid" | "dense" | "bm25";
-export type IndexBackend = "faiss" | "milvus";
 
 export interface Citation {
   id: number;
@@ -46,12 +45,16 @@ export interface Citation {
 }
 
 export interface IndexInfo {
-  index_dir: string;
+  docstore_path: string;
   vectors: number;
   embedding_model?: string | null;
   backend?: string;
   collection_name?: string | null;
   milvus_uri?: string | null;
+  documents?: number | null;
+  chunks?: number | null;
+  parents?: number | null;
+  evidence_count?: number | null;
 }
 
 export interface RoutingInfo {
@@ -75,21 +78,30 @@ export interface HealthResponse {
   index_exists: boolean;
   index_loaded: boolean;
   index?: IndexInfo | null;
+  docstore_exists: boolean;
+  docstore_readable: boolean;
+  docstore_path?: string | null;
+  docstore_chunks: number;
+  docstore_error?: string | null;
   milvus_configured: boolean;
   milvus_connected: boolean;
   milvus_collection?: string | null;
+  milvus_entity_count?: number | null;
+  milvus_aligned_with_docstore?: boolean | null;
   milvus_error?: string | null;
 }
 
 export interface IngestResponse {
   status: string;
   message: string;
+  ingest_run_id?: string | null;
+  docstore: Record<string, unknown>;
+  milvus: Record<string, unknown>;
   index?: IndexInfo | null;
 }
 
 export interface AskRequest {
   question: string;
-  index_backend?: IndexBackend;
   milvus_uri?: string;
   milvus_collection?: string;
   top_k: number;
@@ -140,7 +152,6 @@ export interface AskResponse {
 
 export interface SearchRequest {
   query: string;
-  index_backend?: IndexBackend;
   milvus_uri?: string;
   milvus_collection?: string;
   top_k: number;
@@ -184,7 +195,6 @@ export interface SearchResponse {
 
 export interface AskFormState {
   question: string;
-  index_backend: IndexBackend;
   milvus_uri: string;
   milvus_collection: string;
   top_k: number;
@@ -216,7 +226,6 @@ export interface AskFormState {
 
 export interface SearchFormState {
   query: string;
-  index_backend: IndexBackend;
   milvus_uri: string;
   milvus_collection: string;
   top_k: number;

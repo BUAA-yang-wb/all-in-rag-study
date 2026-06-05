@@ -35,7 +35,6 @@ export function optionalNumber(value: Event): number | null {
 export function buildAskRequest(form: AskFormState): AskRequest {
   const payload: AskRequest = {
     question: form.question.trim(),
-    index_backend: form.index_backend,
     milvus_uri: normalizedMilvusUri(form.milvus_uri),
     milvus_collection: normalizedMilvusCollection(form.milvus_collection),
     top_k: form.top_k,
@@ -69,7 +68,6 @@ export function buildAskRequest(form: AskFormState): AskRequest {
 export function buildSearchRequest(form: SearchFormState): SearchRequest {
   const payload: SearchRequest = {
     query: form.query.trim(),
-    index_backend: form.index_backend,
     milvus_uri: normalizedMilvusUri(form.milvus_uri),
     milvus_collection: normalizedMilvusCollection(form.milvus_collection),
     top_k: form.top_k,

@@ -17,13 +17,21 @@ defineProps<{
     </article>
     <article class="metric-card">
       <Archive :size="19" aria-hidden="true" />
-      <span>索引文件</span>
-      <strong>{{ health ? (health.index_exists ? "存在" : "缺失") : "-" }}</strong>
+      <span>SQLite Docstore</span>
+      <strong>{{ health ? (health.docstore_readable ? `${health.docstore_chunks} chunks` : "不可读") : "-" }}</strong>
     </article>
     <article class="metric-card">
       <Boxes :size="19" aria-hidden="true" />
-      <span>内存索引</span>
-      <strong>{{ health ? (health.index_loaded ? "已加载" : "未加载") : "-" }}</strong>
+      <span>Milvus 对齐</span>
+      <strong>
+        {{
+          health?.milvus_aligned_with_docstore === true
+            ? "一致"
+            : health?.milvus_aligned_with_docstore === false
+              ? "不一致"
+              : "-"
+        }}
+      </strong>
     </article>
     <article class="metric-card">
       <Server :size="19" aria-hidden="true" />
@@ -32,11 +40,11 @@ defineProps<{
     </article>
     <article class="metric-card metric-card--wide">
       <Cpu :size="19" aria-hidden="true" />
-      <span>向量数量 / Embedding / Collection</span>
+      <span>Milvus entities / Embedding / Collection</span>
       <strong>
         {{
           health?.index
-            ? `${health.index.vectors} / ${health.index.embedding_model || "-"} / ${health.milvus_collection || "-"}`
+            ? `${health.milvus_entity_count ?? health.index.vectors} / ${health.index.embedding_model || "-"} / ${health.milvus_collection || "-"}`
             : health?.milvus_collection || "-"
         }}
       </strong>
