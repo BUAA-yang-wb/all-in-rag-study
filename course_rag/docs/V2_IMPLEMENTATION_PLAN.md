@@ -1,8 +1,8 @@
 # Course RAG V2 实施计划
 
-最后更新：2026-06-04
+最后更新：2026-06-05
 
-本文档记录 `course_rag` V2 阶段增强功能的实施计划和完成状态。阶段 1-5 和阶段 7 已进入当前默认索引；阶段 6 VLM caption 保持默认关闭，不默认生成或索引 caption evidence。
+本文档记录 `course_rag` V2 阶段增强功能的实施计划和完成状态。阶段 1-5、阶段 7 和阶段 9 已进入当前默认主链路；阶段 8 新评测体系已完成初版；阶段 6 VLM caption 保持默认关闭，不默认生成或索引 caption evidence。
 
 ## 1. 当前状态
 
@@ -15,7 +15,8 @@ LoadedDocument
 -> EvidenceDocument(text/native_text)
 -> Image evidence / OCR evidence / optional caption evidence
 -> ParentDocument / ChunkedDocument
--> BAAI/bge-small-zh-v1.5 + FAISS
+-> BAAI/bge-small-zh-v1.5 + Milvus dense backend
+-> FAISS baseline 保留为导入源和 fallback
 -> BM25 hybrid + RRF
 -> metadata routing + filter/boost
 -> 默认 bge-reranker-base rerank
@@ -28,15 +29,16 @@ LoadedDocument
 - 文档加载：Markdown、文本层 PDF、DOCX 等文本资料。
 - 父子 chunk：child chunk 用于检索，parent document 用于生成上下文。
 - 检索：dense、BM25、hybrid 三种策略，默认 hybrid。
+- 数据库后端：Milvus standalone 已作为默认 dense 检索后端，FAISS 保留为显式 fallback。
 - 精排：默认开启 `BAAI/bge-reranker-base`。
 - routing：已支持课程、文件、页码、证据类型等可选过滤与调试返回。
 - API：`/ask`、`/search`、`/ingest`、`/health`。
-- 评测：已有 30 条文本 RAG 离线评测集。
+- 评测：已重建 V2 评测体系，当前 `golden_set.jsonl` 有 21 条人工金标样本，覆盖文本、表格、OCR、图片引用、metadata routing 和资料不足问题；默认评测启用外部 LLM 与 LLM judge，详见 `course_rag/docs/RAG_EVALUATION.md`。
 - V2 text evidence：已支持 `EvidenceDocument`、稳定 `evidence_id`、citation 扩展字段和默认 text evidence 索引。
 - V2 visual evidence：已支持独立图片、Markdown `image_refs`、RapidOCR OCR 缓存和可选 caption provider；当前默认索引已包含图片 metadata/image_ref 和 OCR evidence，未包含 caption evidence。
 - V2 table evidence：已支持 Docling JSON 表格优先、Markdown/PDF 类表格文本兜底的混合抽取策略。
 
-当前文本链路已经足够作为 V2 的稳定 baseline。V2 不应一开始就替换 embedding、迁移 Milvus 或重做所有模块，而应围绕当前真实缺口逐步增强。
+当前文本链路已经足够作为 V2 的稳定 baseline。Milvus 已进入默认在线检索后端，但仍复用当前 FAISS baseline 产物导入；FAISS 不删除，继续作为低资源开发和对比评测 fallback。
 
 当前已构建索引的实际状态：
 
@@ -53,6 +55,9 @@ LoadedDocument
 | caption evidence | 0；默认关闭 |
 | chunk / parent 数量 | 9138 chunks / 5840 parents |
 | 来源文件数 | 263 |
+| 默认在线后端 | Milvus collection `course_rag_v2_text` |
+| Milvus entity_count | 9138 |
+| FAISS fallback | 保留，可显式传 `index_backend="faiss"` |
 
 本地环境约束：
 
@@ -420,55 +425,80 @@ context_after
 - 复杂课件表格和扫描表格结构识别不稳定。
 - 大表切分策略需要兼顾检索粒度和上下文完整性。
 
-### 阶段 8：评测集扩展
+### 阶段 8：评测体系重建（已完成初版）
 
 目标：
 
-- 为 V2 能力建立可重复验证的评测，而不是凭主观样例判断效果。
+- 为 V2 能力建立可重复验证的分层评测，而不是凭主观样例判断效果。
+- 评测范围覆盖检索、routing、citation、生成质量、拒答能力和稳定性。
 
 主要改动点：
 
-- 在现有 Day11 文本评测基础上新增 V2 问题。
-- 覆盖图片、扫描页、表格、指定文件、指定页码、题号、流程图类问题。
-- 保留默认 `use_llm=false`，先评测检索和 citation。
-- 新增指标：`Evidence Hit Rate`，判断是否命中正确 evidence 类型和证据位置。
+- 已删除旧评测入口和旧数据集，保留历史 `results/` 作为参考但新系统不读取。
+- 新增 `course_rag/eval/golden_set.jsonl`，覆盖文本、表格、OCR、图片引用、metadata routing 和资料不足问题。
+- 新 `run_eval.py` 默认使用 `profile=default`，启用外部 LLM、hybrid retrieval、metadata routing、rerank 和 parent context。
+- 指标按层输出：检索、路由、引用、生成、LLM judge 和稳定性。
+- 评测完成后生成 JSON/Markdown 报告，并同步更新 `course_rag/docs/RAG_EVALUATION.md`。
 
 验收标准：
 
-- 至少新增 20 条 V2 评测问题。
-- 能分别跑文本 baseline 和 V2 evidence 检索实验。
-- 每次 V2 关键改动后可以对比结果。
+- 默认评测至少跑完整个人工金标种子集。
+- 评测报告必须来自实际运行结果，不手写猜测。
+- 能定位文本、表格、OCR、图片引用、routing 和资料不足样本的主要失败原因。
+
+当前状态：
+
+- 已完成 21 条人工金标样本的默认外部 LLM 评测。
+- 最近一次评测 `evidence_hit@k=1`、`evidence_recall@k=0.9211`、`citation_coverage=1`、`answer_fact_coverage=0.9868`。
+- 主要问题是 OCR evidence 的召回覆盖和排序偏弱，以及部分复杂概念题生成答案不够完整。
 
 风险：
 
 - gold evidence 标注成本较高。
 - V2 资料中图片和扫描页多，人工验证需要看原图或页图。
+- 外部 LLM 评测受网络、API key 和模型稳定性影响，因此仍保留 `profile=fast` 作为离线诊断入口。
 
-### 阶段 9：Milvus 与视觉检索实验
+### 阶段 9：Milvus 数据库后端（已完成主线化与本机验证）
 
 目标：
 
-- 在 evidence 层稳定后，再把索引后端从本地 FAISS baseline 扩展到更工程化的 Milvus。
-- 逐步验证视觉检索，不把 Milvus 作为 V2 第一阶段阻塞项。
+- 在 evidence 层稳定后，把在线 dense 检索后端从本地 FAISS baseline 主线化到 Milvus。
+- Milvus 作为默认文本 evidence 向量数据库后端；FAISS 保留为显式 fallback 和导入源。
+- 本阶段不实施页面图向量、图片向量、ColPali、ColQwen 或任何视觉检索入口。
 
 主要改动点：
 
-- 使用 Milvus standalone 作为后续向量数据库候选。
-- collection 设计至少包含 metadata 标量字段、文本 dense 向量、文本 sparse/BM25 字段。
-- 后续再加入页面图或图片向量。
-- 视觉检索候选方向：ColPali / ColQwen 类页面图检索。
+- 使用 Milvus standalone 作为本地默认向量数据库。
+- collection 包含 chunk 主键、parent 关联、常用 metadata 标量字段、完整 metadata JSON、文本内容和文本 dense 向量。
+- `/ask`、`/search` 和评测脚本默认 `index_backend="milvus"`，可显式传 `index_backend="faiss"` 使用 fallback。
+- `dense` 使用所选后端；`bm25` 继续使用本地内存 BM25；`hybrid` 使用所选 dense 后端和本地 BM25 做 RRF。
+- 新增 Milvus Docker Compose、启动/停止/重建/检查脚本，并支持 FAISS/Milvus 快速评测对比。
+
+当前状态：
+
+- Docker Compose 配置已加入 `course_rag/deploy/milvus/docker-compose.yml`。
+- 本机已实际拉取并启动 `milvus-standalone`、`milvus-etcd`、`milvus-minio`。
+- 三个容器已验证为 `healthy`。
+- 已从 `course_rag/vector_index_v2_text/` 重建 Milvus collection。
+- `course_rag_v2_text` 当前 `entity_count=9138`，与 chunk 数一致。
+- `/health` 已验证返回 `status=ok`、`milvus_connected=true`。
+- 默认 `/search` 已验证返回 `index.backend="milvus"`。
+- 默认 `/ask(use_llm=false)` 已验证返回 `index.backend="milvus"`。
+- 显式 `index_backend="faiss"` 已验证可用。
+- `profile=fast` Milvus 评测已跑通，`error_rate=0`。
+- Milvus/FAISS 对比评测已跑通，Top-K overlap 平均值 `0.9895`，Top-1 变化率 `0`。
 
 验收标准：
 
-- FAISS baseline 仍可运行。
-- Milvus 文本 evidence 检索结果能与 FAISS baseline 对比。
-- 视觉检索只作为实验开关，不影响默认问答链路。
+- FAISS baseline 仍可运行。已验证。
+- Milvus 文本 evidence 检索结果能与 FAISS baseline 对比。已验证。
+- 不传 `index_backend` 时 API 和评测默认使用 Milvus；Milvus 不可用时返回清晰错误，不静默回退 FAISS。已实现并验证。
 
 风险：
 
-- Docker、Milvus 和多向量检索会提高环境复杂度。
+- Docker 和 Milvus 会提高本地环境复杂度。
 - 过早迁移会掩盖 evidence 抽取质量问题。
-- 视觉检索模型对本地显存和推理速度有要求。
+- Milvus collection 如果没有随 FAISS baseline 重建同步刷新，可能出现向量数量或 metadata 不一致。
 
 ## 5. 近期优先级
 
@@ -479,25 +509,25 @@ context_after
 - 阶段 5 已完成 OCR 缓存构建并进入默认索引，当前已有 998 条 `ocr_text`。
 - 阶段 6 caption provider 已接入但默认关闭，当前索引没有 caption evidence。
 - 阶段 7 已完成 table evidence 并进入默认索引，当前已有 139 条 `table_markdown`。
-- 阶段 8 V2 评测集扩展、阶段 9 Milvus/视觉检索实验尚未开始。
+- 阶段 8 新评测体系已完成初版，阶段 9 Milvus 数据库后端已完成主线化配置和本机实际验证；视觉检索不进入本阶段范围。
 
 近期不建议优先做：
 
 - 直接替换 `BAAI/bge-small-zh-v1.5`。
-- 直接迁移 Milvus。
+- 删除 FAISS fallback。
 - 直接上完整多模态生成。
 - 在线 `/ask` 实时调用 VLM。
 - 只把图片 OCR 后当普通文本塞进现有索引。
 
 近期建议优先做：
 
-1. 扩展 V2 评测集，覆盖图片、OCR、表格、指定页码和题号类问题。
+1. 基于当前新评测结果，优先优化 OCR evidence 的召回覆盖和排序。
 2. 抽样检查 OCR/table evidence 的质量，清理明显误抽或低价值 evidence。
-3. 根据评测结果调整 table 文本启发式规则和 OCR 页级阈值。
+3. 继续扩展 V2 golden set，增加更多指定页码、题号、流程图和跨 evidence 综合问题。
 4. 如确实需要视觉语义理解，再配置并小样本验证 `Qwen3-VL-2B-Instruct-GGUF` caption。
-5. 等 evidence 质量稳定后，再做 Milvus 和视觉检索实验。
+5. 基于已跑通的 Milvus/FAISS 对比评测，继续观察后续索引重建后的 overlap、延迟和失败样本；视觉检索暂不实施。
 
-这样可以先把已经进入索引的 OCR/table evidence 做成可评测、可迭代的稳定能力，再考虑更复杂的索引后端和视觉检索。
+这样可以在 Milvus 已成为默认在线后端的基础上，继续把 OCR/table evidence 做成可评测、可迭代的稳定能力；视觉检索暂不纳入当前实施范围。
 
 ## 6. 验证规则
 
@@ -516,7 +546,7 @@ context_after
 ```
 
 - 涉及 API 时，优先使用 FastAPI `TestClient` 做轻量验证。
-- 涉及问答验证时，默认使用：
+- 涉及普通问答验证时，默认使用：
 
 ```json
 {
@@ -524,6 +554,18 @@ context_after
 }
 ```
 
-- 避免默认真实调用外部 LLM、OCR/VLM API、下载模型或安装依赖。
+- 涉及评测体系验证时，默认命令为：
+
+```powershell
+.\rag\Scripts\python.exe -X utf8 course_rag\eval\run_eval.py --profile default
+```
+
+- 如果只需要快速离线诊断，可使用：
+
+```powershell
+.\rag\Scripts\python.exe -X utf8 course_rag\eval\run_eval.py --profile fast
+```
+
+- 普通开发验证避免默认真实调用外部 LLM、OCR/VLM API、下载模型或安装依赖；评测体系的 `profile=default` 例外，因为它用于端到端效果评估。
 - V2 候选 OCR/VLM 模型文件已下载；OCR 默认可用 RapidOCR，VLM caption 仍需要按需安装或配置 llama.cpp 运行时。
 - 如果必须下载模型、安装依赖、启动 Milvus 或调用外部 API，需要先说明影响并等待确认。

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 
 RetrievalStrategy = Literal["hybrid", "dense", "bm25"]
+IndexBackend = Literal["faiss", "milvus"]
 
 
 class Citation(BaseModel):
@@ -61,10 +62,16 @@ class IndexInfo(BaseModel):
     index_dir: str
     vectors: int
     embedding_model: str | None = None
+    backend: str = "faiss"
+    collection_name: str | None = None
+    milvus_uri: str | None = None
 
 
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=1)
+    index_backend: IndexBackend = "milvus"
+    milvus_uri: str = "http://localhost:19530"
+    milvus_collection: str = "course_rag_v2_text"
     top_k: int = Field(default=5, ge=1, le=20)
     candidate_k: int | None = Field(default=None, ge=1, le=100)
     strategy: RetrievalStrategy = "hybrid"
@@ -113,6 +120,9 @@ class AskResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
+    index_backend: IndexBackend = "milvus"
+    milvus_uri: str = "http://localhost:19530"
+    milvus_collection: str = "course_rag_v2_text"
     top_k: int = Field(default=5, ge=1, le=20)
     candidate_k: int | None = Field(default=None, ge=1, le=100)
     strategy: RetrievalStrategy = "hybrid"
@@ -178,6 +188,10 @@ class HealthResponse(BaseModel):
     index_exists: bool
     index_loaded: bool
     index: IndexInfo | None = None
+    milvus_configured: bool = True
+    milvus_connected: bool = False
+    milvus_collection: str | None = None
+    milvus_error: str | None = None
 
 
 def citation_with_text(payload: dict[str, Any]) -> dict[str, Any]:
