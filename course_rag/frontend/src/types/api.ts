@@ -1,4 +1,5 @@
 export type RetrievalStrategy = "hybrid" | "dense" | "bm25";
+export type IndexBackend = "faiss" | "milvus";
 
 export interface Citation {
   id: number;
@@ -48,6 +49,9 @@ export interface IndexInfo {
   index_dir: string;
   vectors: number;
   embedding_model?: string | null;
+  backend?: string;
+  collection_name?: string | null;
+  milvus_uri?: string | null;
 }
 
 export interface RoutingInfo {
@@ -71,6 +75,10 @@ export interface HealthResponse {
   index_exists: boolean;
   index_loaded: boolean;
   index?: IndexInfo | null;
+  milvus_configured: boolean;
+  milvus_connected: boolean;
+  milvus_collection?: string | null;
+  milvus_error?: string | null;
 }
 
 export interface IngestResponse {
@@ -81,6 +89,9 @@ export interface IngestResponse {
 
 export interface AskRequest {
   question: string;
+  index_backend?: IndexBackend;
+  milvus_uri?: string;
+  milvus_collection?: string;
   top_k: number;
   candidate_k?: number;
   strategy: RetrievalStrategy;
@@ -129,6 +140,9 @@ export interface AskResponse {
 
 export interface SearchRequest {
   query: string;
+  index_backend?: IndexBackend;
+  milvus_uri?: string;
+  milvus_collection?: string;
   top_k: number;
   candidate_k?: number;
   strategy: RetrievalStrategy;
@@ -170,6 +184,9 @@ export interface SearchResponse {
 
 export interface AskFormState {
   question: string;
+  index_backend: IndexBackend;
+  milvus_uri: string;
+  milvus_collection: string;
   top_k: number;
   candidate_k: number | null;
   strategy: RetrievalStrategy;
@@ -199,6 +216,9 @@ export interface AskFormState {
 
 export interface SearchFormState {
   query: string;
+  index_backend: IndexBackend;
+  milvus_uri: string;
+  milvus_collection: string;
   top_k: number;
   candidate_k: number | null;
   strategy: RetrievalStrategy;

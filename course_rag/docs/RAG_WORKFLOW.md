@@ -1,6 +1,6 @@
 # Course RAG 当前工作流
 
-最后更新：2026-06-04
+最后更新：2026-06-05
 
 本文档总结 `course_rag` 当前系统从资料入库、检索到回答生成的主流程。后续如果改动索引、检索、rerank、生成、API 参数或返回结构，需要同步更新本文档。
 
@@ -25,6 +25,9 @@ FastAPI 入口位于 `course_rag/app/main.py`：
 .\rag\Scripts\python.exe -X utf8 -m uvicorn course_rag.app.main:app --reload
 ```
 
+当前默认 `/ask` 和 `/search` 使用 Milvus。启动 FastAPI 前，建议先确认 Docker
+Desktop、Milvus standalone 和 `course_rag_v2_text` collection 已就绪。
+
 ## 2. 离线索引构建
 
 索引构建由 `course_rag/app/rag/indexing.py` 负责。当前流程是：
@@ -40,6 +43,11 @@ FastAPI 入口位于 `course_rag/app/main.py`：
 -> 保存 chunks / parents / parent_child_map / index_meta
 ```
 
+Milvus 是当前默认在线 dense 检索后端。Milvus collection 从
+`vector_index_v2_text/` 的 FAISS baseline 产物导入，复用同一批 chunk、parent、
+metadata 和 512 维文本向量；不包含页面图向量、图片向量或视觉检索模型。
+FAISS 文件仍保留，作为 Milvus 导入源、低资源开发和对比评测 fallback。
+
 当前索引配置：
 
 | 项 | 当前值 |
@@ -52,6 +60,22 @@ FastAPI 入口位于 `course_rag/app/main.py`：
 | 当前 vectors | 9138 |
 | parent 数 | 5840 |
 | parent-child 映射 | 9138 |
+| 默认数据库后端 | Milvus collection `course_rag_v2_text`，默认连接 `http://localhost:19530` |
+| fallback baseline | FAISS，显式传 `index_backend="faiss"` 使用 |
+
+当前本机 Milvus 状态：
+
+| 项 | 当前值 |
+| --- | --- |
+| Docker Compose 配置 | `course_rag/deploy/milvus/docker-compose.yml` |
+| Milvus 版本 | `milvusdb/milvus:v2.5.27` |
+| 依赖容器 | `milvus-etcd`、`milvus-minio` |
+| 容器状态 | 三个容器已实际启动并验证为 `healthy` |
+| Milvus 端口 | `19530` |
+| 健康检查端口 | `9091` |
+| collection | `course_rag_v2_text` |
+| collection entity_count | 9138 |
+| API 健康检查 | `/health` 返回 `status=ok`、`milvus_connected=true` |
 
 ## 3. 统一证据层
 
@@ -113,6 +137,26 @@ course_rag/data/processed/evidence_v2.jsonl
 
 OCR 是离线任务，不在 `/ask` 或 `/search` 中实时运行。低文本 PDF 页会先渲染到 `course_rag/data/processed/page_images/`，再交给 RapidOCR。caption 需要显式 `--run-caption --caption-provider llama-cpp-cli` 并配置本地 VLM 运行时；当前默认关闭。
 
+本地 Milvus 使用 Docker Compose standalone 部署。启动顺序：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File course_rag\scripts\milvus_up.ps1
+powershell -ExecutionPolicy Bypass -File course_rag\scripts\milvus_rebuild_index.ps1
+powershell -ExecutionPolicy Bypass -File course_rag\scripts\milvus_check.ps1
+```
+
+其中 `milvus_up.ps1` 只会调用 Docker CLI，不会自动启动 Docker Desktop。如果 Docker
+daemon 不可用，需要先手动打开 Docker Desktop。首次启动会拉取 Milvus、etcd 和
+MinIO 镜像；当前本机已完成镜像拉取、容器启动和 collection 导入。Milvus、etcd、
+MinIO 的本地数据保存在 `course_rag/deploy/milvus/volumes/`，停止容器不会删除数据。
+
+直接使用 Python CLI 做构建或检查：
+
+```powershell
+.\rag\Scripts\python.exe -X utf8 course_rag\app\rag\milvus_index.py --drop-existing
+.\rag\Scripts\python.exe -X utf8 course_rag\app\rag\milvus_index.py --check --query "FIRST FOLLOW 表格"
+```
+
 截至当前索引，evidence 统计为：
 
 | evidence_kind | 数量 |
@@ -131,7 +175,7 @@ OCR 是离线任务，不在 `/ask` 或 `/search` 中实时运行。低文本 PD
 
 ```text
 用户问题
--> 加载本地索引
+-> 加载 Milvus collection 与本地 chunk/parent metadata
 -> dense / BM25 / hybrid 召回
 -> metadata routing 过滤或加权
 -> rerank 精排
@@ -143,7 +187,7 @@ OCR 是离线任务，不在 `/ask` 或 `/search` 中实时运行。低文本 PD
 
 当前默认检索策略是 `hybrid`：
 
-- dense：用 `BAAI/bge-small-zh-v1.5` 编码问题，在 FAISS 中检索。
+- dense：用 `BAAI/bge-small-zh-v1.5` 编码问题，在所选后端中检索；默认后端是 Milvus，可显式传 `index_backend="faiss"` 使用 FAISS fallback。
 - BM25：用 `rank-bm25` 在内存中基于 chunk 正文和部分 metadata 检索。
 - hybrid：dense 和 BM25 分别召回后，用 RRF 融合排序。
 
@@ -158,6 +202,25 @@ candidate_k = max(top_k * 4, 30)
 ```json
 {
   "use_rerank": false
+}
+```
+
+默认 Milvus 请求示例：
+
+```json
+{
+  "query": "FIRST FOLLOW 表格",
+  "milvus_uri": "http://localhost:19530",
+  "milvus_collection": "course_rag_v2_text"
+}
+```
+
+显式使用 FAISS fallback：
+
+```json
+{
+  "query": "FIRST FOLLOW 表格",
+  "index_backend": "faiss"
 }
 ```
 
@@ -234,6 +297,11 @@ candidate_k = max(top_k * 4, 30)
 - `context_before`
 - `context_after`
 
+`index` 调试信息会返回当前后端。默认 Milvus 返回 `backend="milvus"`、
+`collection_name` 和 `milvus_uri`；显式 FAISS fallback 返回 `backend="faiss"`。
+`/health` 额外返回 `milvus_configured`、`milvus_connected`、`milvus_collection`
+和 `milvus_error`，用于判断 Docker/Milvus/collection 是否就绪。
+
 回答中仍使用 `[1]`、`[2]` 形式引用资料。资料不足时，prompt 要求模型明确说明资料不足，而不是编造。
 
 ## 8. 验证方式
@@ -264,14 +332,35 @@ OCR 检索可用：
 }
 ```
 
+Milvus 与 FAISS 快速对比：
+
+```powershell
+.\rag\Scripts\python.exe -X utf8 course_rag\eval\run_eval.py --profile fast --index-backend milvus --compare-index-backend faiss --no-write-doc
+```
+
+当前已完成的 Milvus 主线验证：
+
+| 验证项 | 结果 |
+| --- | --- |
+| Python 语法检查 | `compileall course_rag\app course_rag\eval` 通过 |
+| Milvus dry-run | 读取到 9138 chunks、5840 parents、512 维向量 |
+| Milvus rebuild | `inserted=9138`、`entity_count=9138` |
+| Milvus check | 可返回合法 citation |
+| `/health` | `status=ok`、`milvus_connected=true` |
+| 默认 `/search` | 返回 `index.backend="milvus"` |
+| 默认 `/ask(use_llm=false)` | 返回 `index.backend="milvus"` |
+| 显式 FAISS fallback | 返回 `index.backend="faiss"` |
+| fast eval | Milvus 无运行错误 |
+| Milvus vs FAISS | Top-K overlap 平均值 `0.9895`，Top-1 变化率 `0.0` |
+
 ## 9. 当前 Pipeline
 
 默认 `strategy="hybrid"` 时：
 
 ```text
-load_vector_index
+load_milvus_index
 -> encode_query
--> faiss_candidate_search
+-> milvus_candidate_search
 -> bm25_candidate_search
 -> rrf_fusion
 -> metadata_route_query
@@ -283,3 +372,7 @@ load_vector_index
 -> assemble_context
 -> llm_generation / retrieval_only_fallback
 ```
+
+显式使用 FAISS fallback 时，pipeline 中的 `load_milvus_index` 和
+`milvus_candidate_search` 会变为 `load_faiss_index` 和 `faiss_candidate_search`；
+BM25、RRF、metadata routing、rerank 和 parent context 逻辑保持不变。

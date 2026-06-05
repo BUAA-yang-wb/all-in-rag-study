@@ -1,8 +1,8 @@
 # Course RAG 评测体系
 
-最后更新：2026-06-04T15:21:14
+最后更新：2026-06-05T11:47:59
 
-本文档记录当前 `course_rag` 新评测体系的设计、运行方式和最近一次实际评测结果。当前评测不再复用旧评测集，而是围绕现有系统的 evidence-first RAG 流程重新设计。
+本文档记录当前 `course_rag` 新评测体系的设计、运行方式、Milvus 主线验证结果和最近一次端到端 LLM 评测结果。当前评测不再复用旧评测集，而是围绕现有系统的 evidence-first RAG 流程重新设计。
 
 ## 1. 评测目标
 
@@ -36,27 +36,92 @@ course_rag/eval/golden_set.jsonl
 
 默认 profile 会启用外部 LLM，沿用主系统 DeepSeek-compatible 配置：`deepseek-v4-pro`、`https://api.deepseek.com`、`DEEPSEEK_API_KEY_RAGLEARN`。如果环境变量缺失，脚本会自动降级为离线检索和引用诊断。
 
-## 3. 指标说明
+默认评测使用 Milvus 后端。需要先启动 Docker Desktop、运行
+`course_rag\scripts\milvus_up.ps1`，并用 `course_rag\scripts\milvus_rebuild_index.ps1`
+构建 collection。需要低资源或离线 fallback 时，可显式选择 FAISS：
 
-### 3.1 检索指标
+```powershell
+.\rag\Scripts\python.exe -X utf8 course_rag\eval\run_eval.py --profile fast --index-backend faiss --no-write-doc
+```
+
+如果需要在同一份报告中比较 FAISS 与 Milvus 的 Top-K 差异，可使用：
+
+```powershell
+.\rag\Scripts\python.exe -X utf8 course_rag\eval\run_eval.py --profile fast --index-backend milvus --compare-index-backend faiss --no-write-doc
+```
+
+## 3. 当前 Milvus 主线验证
+
+本轮验证时间：`2026-06-05T11:47:59`。
+
+运行命令：
+
+```powershell
+.\rag\Scripts\python.exe -X utf8 course_rag\eval\run_eval.py --profile fast --index-backend milvus --compare-index-backend faiss --no-write-doc
+```
+
+运行配置：
+
+| 项 | 值 |
+| --- | --- |
+| profile | `fast` |
+| 主后端 | `milvus` |
+| 对比后端 | `faiss` |
+| 样本数 | 21 |
+| 向量数 | 9138 |
+| 是否调用 LLM | false |
+| 是否使用 rerank | false |
+| collection | `course_rag_v2_text` |
+
+Milvus fast 指标：
+
+| 指标 | 值 |
+| --- | ---: |
+| `evidence_hit@k` | 0.7895 |
+| `evidence_recall@k` | 0.7632 |
+| `mrr` | 0.6816 |
+| `context_precision@k` | 0.463 |
+| `routing_filter_success` | 1 |
+| `routing_fallback_rate` | 0.1429 |
+| `expected_modality_hit` | 0.9474 |
+| `citation_validity` | 0.9048 |
+| `citation_coverage` | 0.7895 |
+| `error_rate` | 0 |
+| `latency_ms_avg` | 1247.6 |
+
+Milvus 与 FAISS 对比：
+
+| 指标 | 值 |
+| --- | ---: |
+| Top-K overlap 平均值 | 0.9895 |
+| Top-1 变化率 | 0 |
+| 对比错误率 | 0 |
+
+结论：Milvus 已经能作为当前默认在线检索后端运行。collection entity 数与当前 chunk 数一致，默认 `/search` 和 `/ask(use_llm=false)` 返回 `index.backend="milvus"`；FAISS 显式 fallback 仍可用。Top-K overlap 接近 1，说明 Milvus 后端没有破坏当前 FAISS baseline 的主要召回行为。
+
+注意：`profile=fast` 关闭 LLM 和 rerank，主要用于检索链路、后端迁移和稳定性诊断；它的生成相关指标不能直接和下面的默认端到端 LLM 评测等价比较。
+
+## 4. 指标说明
+
+### 4.1 检索指标
 
 - `evidence_hit@k`：Top-K 检索结果里是否至少命中一个期望 evidence。越接近 1，说明“有没有找对资料”的能力越稳定。
 - `evidence_recall@k`：期望 evidence 被 Top-K 结果覆盖的比例。适合观察多证据问题是否召回完整。
 - `mrr`：第一个正确 evidence 的排名质量。正确证据越靠前，分数越高。
 - `context_precision@k`：Top-K 上下文中有效 evidence 的占比。该值低说明虽然能召回正确资料，但上下文里仍混入较多无关片段。
 
-### 3.2 路由指标
+### 4.2 路由指标
 
 - `routing_filter_success`：带 metadata 约束的问题是否正确应用过滤条件，例如指定课程、文件、页码或 evidence 类型。
 - `routing_fallback_rate`：严格过滤没有结果后触发回退检索的比例。少量回退是正常的，过高则说明 metadata 或索引粒度需要优化。
 - `expected_modality_hit`：是否命中预期模态，例如文本、表格、OCR、图片引用等。
 
-### 3.3 引用指标
+### 4.3 引用指标
 
 - `citation_validity`：回答中返回的 citation 是否能对应到真实检索结果或 evidence。
 - `citation_coverage`：需要引用支撑的问题是否返回了 citation。越高说明答案更容易追溯来源。
 
-### 3.4 生成指标
+### 4.4 生成指标
 
 - `answer_fact_coverage`：回答是否覆盖金标中要求的关键事实。
 - `abstention_success`：资料不足样本是否拒答，或明确说明当前资料无法支持答案。
@@ -64,14 +129,14 @@ course_rag/eval/golden_set.jsonl
 - `judge_relevance`：LLM 裁判判断答案是否切题。
 - `judge_completeness`：LLM 裁判判断答案是否完整覆盖问题。
 
-### 3.5 稳定性指标
+### 4.5 稳定性指标
 
 - `error_rate`：评测过程中发生运行错误的样本比例。
 - `llm_error_rate`：外部 LLM 生成阶段发生错误或降级的样本比例。
 - `latency_ms_avg`：平均响应耗时，单位毫秒。
 - `latency_ms_p95`：95 分位响应耗时，用于观察慢请求。
 
-## 4. 最近一次评测配置
+## 5. 最近一次端到端 LLM 评测配置
 
 - 评测时间：`2026-06-04T15:21:14`
 - 评测 profile：`default`
@@ -80,7 +145,7 @@ course_rag/eval/golden_set.jsonl
 - 是否启用 LLM 裁判：`True`
 - API key 是否可用：`True`
 
-## 5. 总体结果
+## 6. 端到端 LLM 总体结果
 
 | 指标 | 分数 | 简要解读 |
 | --- | ---: | --- |
@@ -104,7 +169,7 @@ course_rag/eval/golden_set.jsonl
 | `latency_ms_avg` | 8140.5 | 平均耗时约 8.1 秒。 |
 | `latency_ms_p95` | 15567.5 | 慢请求约 15.6 秒，主要受外部 LLM 和 rerank 影响。 |
 
-## 6. 分类型结果
+## 7. 端到端 LLM 分类型结果
 
 | 类型 | 样本数 | 检索命中 | 检索覆盖 | 首个正确证据排名 | 答案事实覆盖 | 引用覆盖 | LLM 错误率 | 平均耗时 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -115,7 +180,7 @@ course_rag/eval/golden_set.jsonl
 | 表格证据 | 3 | 1 | 1 | 0.7778 | 1 | 1 | 0 | 6940.4ms |
 | 文本检索 | 9 | 1 | 1 | 0.8704 | 0.9722 | 1 | 0 | 10619.7ms |
 
-## 7. 当前结果总结
+## 8. 当前结果总结
 
 整体看，当前系统已经具备较稳定的端到端 RAG 能力。文本、表格、图片引用、metadata routing 的命中表现较好；引用覆盖率为 1，说明回答基本都能给出可追溯来源；资料不足样本也能正确拒答，没有出现明显幻觉式回答。
 

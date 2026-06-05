@@ -19,6 +19,14 @@ from .rag.indexing import (
     build_or_load_vector_index,
     has_saved_index,
 )
+from .rag.milvus_index import (
+    DEFAULT_MILVUS_COLLECTION,
+    DEFAULT_MILVUS_URI,
+    MilvusTextIndex,
+    build_or_load_milvus_text_index,
+    create_milvus_client,
+    milvus_connection_error,
+)
 from .schemas import (
     AskRequest,
     AskResponse,
@@ -44,6 +52,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 _index_lock = Lock()
 _vector_index: CourseVectorIndex | None = None
+_milvus_indexes: dict[tuple[str, str], MilvusTextIndex] = {}
 
 
 @app.get("/", include_in_schema=False)
@@ -64,11 +73,23 @@ def health() -> HealthResponse:
     """Return service and vector-index status."""
 
     index_exists = has_saved_index(DEFAULT_INDEX_DIR)
+    milvus_connected, milvus_error = default_milvus_health()
+    loaded_index = first_loaded_index()
+    if not index_exists:
+        status = "missing_index"
+    elif milvus_error:
+        status = "missing_milvus" if not milvus_connected else "missing_milvus_collection"
+    else:
+        status = "ok"
     return HealthResponse(
-        status="ok" if index_exists else "missing_index",
+        status=status,
         index_exists=index_exists,
-        index_loaded=_vector_index is not None,
-        index=index_info(_vector_index) if _vector_index is not None else None,
+        index_loaded=loaded_index is not None,
+        index=index_info(loaded_index) if loaded_index is not None else None,
+        milvus_configured=True,
+        milvus_connected=milvus_connected,
+        milvus_collection=DEFAULT_MILVUS_COLLECTION,
+        milvus_error=milvus_error,
     )
 
 
@@ -77,6 +98,9 @@ def ask(request: AskRequest) -> AskResponse:
     """Answer a user question using retrieval plus optional LLM generation."""
 
     config = GenerationConfig(
+        index_backend=request.index_backend,
+        milvus_uri=request.milvus_uri,
+        milvus_collection=request.milvus_collection,
         top_k=request.top_k,
         candidate_k=request.candidate_k,
         retrieval_strategy=request.strategy,
@@ -109,7 +133,11 @@ def ask(request: AskRequest) -> AskResponse:
             index_dir=DEFAULT_INDEX_DIR,
             embedding_model=DEFAULT_EMBEDDING_MODEL,
             config=config,
-            vector_index=get_vector_index(),
+            vector_index=get_index(
+                index_backend=request.index_backend,
+                milvus_uri=request.milvus_uri,
+                milvus_collection=request.milvus_collection,
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - convert service failures to API errors.
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -121,6 +149,9 @@ def search(request: SearchRequest) -> SearchResponse:
     """Return retrieval evidence without calling the LLM."""
 
     config = GenerationConfig(
+        index_backend=request.index_backend,
+        milvus_uri=request.milvus_uri,
+        milvus_collection=request.milvus_collection,
         top_k=request.top_k,
         candidate_k=request.candidate_k,
         retrieval_strategy=request.strategy,
@@ -149,7 +180,11 @@ def search(request: SearchRequest) -> SearchResponse:
             index_dir=DEFAULT_INDEX_DIR,
             embedding_model=DEFAULT_EMBEDDING_MODEL,
             config=config,
-            vector_index=get_vector_index(),
+            vector_index=get_index(
+                index_backend=request.index_backend,
+                milvus_uri=request.milvus_uri,
+                milvus_collection=request.milvus_collection,
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - convert service failures to API errors.
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -203,6 +238,19 @@ def ingest(request: IngestRequest) -> IngestResponse:
     )
 
 
+def get_index(
+    *,
+    index_backend: str,
+    milvus_uri: str,
+    milvus_collection: str,
+) -> CourseVectorIndex | MilvusTextIndex:
+    if index_backend == "faiss":
+        return get_vector_index()
+    if index_backend == "milvus":
+        return get_milvus_index(uri=milvus_uri, collection_name=milvus_collection)
+    raise ValueError(f"unsupported index_backend: {index_backend}")
+
+
 def get_vector_index() -> CourseVectorIndex:
     global _vector_index
     if _vector_index is not None:
@@ -216,6 +264,25 @@ def get_vector_index() -> CourseVectorIndex:
                 show_progress_bar=False,
             )
     return _vector_index
+
+
+def get_milvus_index(*, uri: str, collection_name: str) -> MilvusTextIndex:
+    key = (uri, collection_name)
+    cached = _milvus_indexes.get(key)
+    if cached is not None:
+        return cached
+
+    with _index_lock:
+        cached = _milvus_indexes.get(key)
+        if cached is None:
+            cached = build_or_load_milvus_text_index(
+                index_dir=DEFAULT_INDEX_DIR,
+                model_name=DEFAULT_EMBEDDING_MODEL,
+                uri=uri,
+                collection_name=collection_name,
+            )
+            _milvus_indexes[key] = cached
+    return cached
 
 
 def refresh_vector_index(
@@ -252,6 +319,29 @@ def refresh_vector_index(
             pdf_page_low_text_chars=pdf_page_low_text_chars,
             caption_max_items=caption_max_items,
         )
+        _milvus_indexes.clear()
+    return _vector_index
+
+
+def default_milvus_health() -> tuple[bool, str | None]:
+    try:
+        client = create_milvus_client(DEFAULT_MILVUS_URI)
+        has_collection = client.has_collection(DEFAULT_MILVUS_COLLECTION)
+    except Exception as exc:  # noqa: BLE001 - health should return diagnostics, not 500.
+        return False, milvus_connection_error(DEFAULT_MILVUS_URI, exc)
+    if not has_collection:
+        return (
+            True,
+            f"Milvus collection not found: {DEFAULT_MILVUS_COLLECTION}. "
+            r"Run `powershell -ExecutionPolicy Bypass -File "
+            r"course_rag\scripts\milvus_rebuild_index.ps1` after Milvus is up.",
+        )
+    return True, None
+
+
+def first_loaded_index() -> CourseVectorIndex | MilvusTextIndex | None:
+    if _milvus_indexes:
+        return next(iter(_milvus_indexes.values()))
     return _vector_index
 
 
@@ -268,11 +358,14 @@ def normalize_result(result: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def index_info(vector_index: CourseVectorIndex) -> IndexInfo:
+def index_info(vector_index: CourseVectorIndex | MilvusTextIndex) -> IndexInfo:
     return IndexInfo(
         index_dir=safe_path(DEFAULT_INDEX_DIR),
         vectors=vector_index.index.ntotal,
         embedding_model=vector_index.metadata.get("embedding_model"),
+        backend=vector_index.metadata.get("index_backend", "faiss"),
+        collection_name=vector_index.metadata.get("milvus_collection"),
+        milvus_uri=vector_index.metadata.get("milvus_uri"),
     )
 
 

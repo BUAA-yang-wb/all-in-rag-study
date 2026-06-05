@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, Archive, Boxes, Cpu } from "lucide-vue-next";
+import { Activity, Archive, Boxes, Cpu, Server } from "lucide-vue-next";
 
 import type { HealthResponse } from "@/types/api";
 
@@ -25,14 +25,19 @@ defineProps<{
       <span>内存索引</span>
       <strong>{{ health ? (health.index_loaded ? "已加载" : "未加载") : "-" }}</strong>
     </article>
+    <article class="metric-card">
+      <Server :size="19" aria-hidden="true" />
+      <span>Milvus</span>
+      <strong>{{ health ? (health.milvus_connected ? "已连接" : "未连接") : "-" }}</strong>
+    </article>
     <article class="metric-card metric-card--wide">
       <Cpu :size="19" aria-hidden="true" />
-      <span>向量数量 / Embedding</span>
+      <span>向量数量 / Embedding / Collection</span>
       <strong>
         {{
           health?.index
-            ? `${health.index.vectors} / ${health.index.embedding_model || "-"}`
-            : "-"
+            ? `${health.index.vectors} / ${health.index.embedding_model || "-"} / ${health.milvus_collection || "-"}`
+            : health?.milvus_collection || "-"
         }}
       </strong>
     </article>

@@ -5,13 +5,19 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .indexing import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_INDEX_DIR,
     CourseVectorIndex,
     build_or_load_vector_index,
+)
+from .milvus_index import (
+    DEFAULT_MILVUS_COLLECTION,
+    DEFAULT_MILVUS_URI,
+    MilvusTextIndex,
+    build_or_load_milvus_text_index,
 )
 from .retrieval import (
     DEFAULT_RETRIEVAL_STRATEGY,
@@ -40,12 +46,16 @@ from .routing import (
 DEFAULT_LLM_MODEL = "deepseek-v4-pro"
 DEFAULT_LLM_BASE_URL = "https://api.deepseek.com"
 DEFAULT_API_KEY_ENV = "DEEPSEEK_API_KEY_RAGLEARN"
+IndexBackend = Literal["faiss", "milvus"]
 
 
 @dataclass(frozen=True)
 class GenerationConfig:
     """Runtime settings for one RAG answer request."""
 
+    index_backend: IndexBackend = "milvus"
+    milvus_uri: str = DEFAULT_MILVUS_URI
+    milvus_collection: str = DEFAULT_MILVUS_COLLECTION
     top_k: int = 5
     candidate_k: int | None = None
     retrieval_strategy: RetrievalStrategy = DEFAULT_RETRIEVAL_STRATEGY
@@ -82,7 +92,7 @@ def answer_question(
     index_dir: Path = DEFAULT_INDEX_DIR,
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     config: GenerationConfig | None = None,
-    vector_index: CourseVectorIndex | None = None,
+    vector_index: Any | None = None,
     retriever: CourseRetriever | None = None,
 ) -> dict[str, Any]:
     """Retrieve course contexts, generate an answer, and return citations."""
@@ -91,10 +101,12 @@ def answer_question(
         raise ValueError("question must not be empty")
 
     selected_config = config or GenerationConfig()
-    active_index = vector_index or build_or_load_vector_index(
+    active_index = vector_index or load_index_for_backend(
+        index_backend=selected_config.index_backend,
         index_dir=index_dir,
-        model_name=embedding_model,
-        show_progress_bar=False,
+        embedding_model=embedding_model,
+        milvus_uri=selected_config.milvus_uri,
+        milvus_collection=selected_config.milvus_collection,
     )
 
     active_retriever = retriever or get_course_retriever(active_index)
@@ -201,8 +213,11 @@ def answer_question(
         "rerank_error": rerank_error,
         "routing": routing_debug,
         "pipeline": [
-            "load_vector_index",
-            *retrieval_pipeline_steps(selected_config.retrieval_strategy),
+            f"load_{index_backend_name(active_index, selected_config)}_index",
+            *retrieval_pipeline_steps(
+                selected_config.retrieval_strategy,
+                index_backend=index_backend_name(active_index, selected_config),
+            ),
             *metadata_routing_pipeline_steps(routing_debug),
             *rerank_pipeline_steps(
                 use_rerank=selected_config.use_rerank,
@@ -219,8 +234,35 @@ def answer_question(
             "index_dir": safe_path(index_dir),
             "vectors": active_index.index.ntotal,
             "embedding_model": active_index.metadata.get("embedding_model"),
+            "backend": index_backend_name(active_index, selected_config),
+            "collection_name": active_index.metadata.get("milvus_collection"),
+            "milvus_uri": active_index.metadata.get("milvus_uri"),
         },
     }
+
+
+def load_index_for_backend(
+    *,
+    index_backend: IndexBackend,
+    index_dir: Path,
+    embedding_model: str,
+    milvus_uri: str,
+    milvus_collection: str,
+) -> Any:
+    if index_backend == "faiss":
+        return build_or_load_vector_index(
+            index_dir=index_dir,
+            model_name=embedding_model,
+            show_progress_bar=False,
+        )
+    if index_backend == "milvus":
+        return build_or_load_milvus_text_index(
+            index_dir=index_dir,
+            model_name=embedding_model,
+            uri=milvus_uri,
+            collection_name=milvus_collection,
+        )
+    raise ValueError(f"unsupported index_backend: {index_backend}")
 
 
 def select_contexts(
@@ -519,14 +561,23 @@ def visible_text_len(text: str) -> int:
     return len("".join(str(text).split()))
 
 
-def retrieval_pipeline_steps(strategy: RetrievalStrategy) -> list[str]:
+def retrieval_pipeline_steps(
+    strategy: RetrievalStrategy,
+    *,
+    index_backend: str,
+) -> list[str]:
+    dense_step = (
+        "milvus_candidate_search"
+        if index_backend == "milvus"
+        else "faiss_candidate_search"
+    )
     if strategy == "dense":
-        return ["encode_query", "faiss_candidate_search"]
+        return ["encode_query", dense_step]
     if strategy == "bm25":
         return ["bm25_tokenize_query", "bm25_candidate_search"]
     return [
         "encode_query",
-        "faiss_candidate_search",
+        dense_step,
         "bm25_candidate_search",
         "rrf_fusion",
     ]
@@ -568,6 +619,15 @@ def retrievers_for_strategy(strategy: RetrievalStrategy) -> list[str]:
     if strategy == "bm25":
         return ["bm25"]
     return ["dense", "bm25"]
+
+
+def index_backend_name(
+    vector_index: Any,
+    config: GenerationConfig,
+) -> str:
+    if isinstance(vector_index, MilvusTextIndex):
+        return "milvus"
+    return str(vector_index.metadata.get("index_backend") or config.index_backend or "faiss")
 
 
 def round_optional(value: Any, *, digits: int) -> float | None:
