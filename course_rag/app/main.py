@@ -11,21 +11,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from .rag.docstore import DEFAULT_DOCSTORE_PATH, inspect_docstore
 from .rag.generation import GenerationConfig, answer_question
-from .rag.indexing import (
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_INDEX_DIR,
-    CourseVectorIndex,
-    build_or_load_vector_index,
-    has_saved_index,
-)
+from .rag.indexing import DEFAULT_EMBEDDING_MODEL
 from .rag.milvus_index import (
+    DEFAULT_MILVUS_BATCH_SIZE,
     DEFAULT_MILVUS_COLLECTION,
+    DEFAULT_MILVUS_SCHEMA_VERSION,
     DEFAULT_MILVUS_URI,
     MilvusTextIndex,
     build_or_load_milvus_text_index,
     create_milvus_client,
     milvus_connection_error,
+    milvus_entity_count,
+    rebuild_milvus_text_index,
 )
 from .schemas import (
     AskRequest,
@@ -51,8 +50,7 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 _index_lock = Lock()
-_vector_index: CourseVectorIndex | None = None
-_milvus_indexes: dict[tuple[str, str], MilvusTextIndex] = {}
+_milvus_indexes: dict[tuple[str, str, str], MilvusTextIndex] = {}
 
 
 @app.get("/", include_in_schema=False)
@@ -70,25 +68,43 @@ def frontend() -> FileResponse:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """Return service and vector-index status."""
+    """Return service, SQLite docstore, and Milvus collection status."""
 
-    index_exists = has_saved_index(DEFAULT_INDEX_DIR)
-    milvus_connected, milvus_error = default_milvus_health()
+    docstore_status = inspect_docstore(DEFAULT_DOCSTORE_PATH)
+    docstore_chunks = int(docstore_status.get("chunks") or 0)
+    docstore_ready = bool(docstore_status.get("readable") and docstore_chunks > 0)
+    milvus_connected, milvus_error, milvus_count = default_milvus_health()
     loaded_index = first_loaded_index()
-    if not index_exists:
-        status = "missing_index"
+    aligned = (
+        milvus_count == docstore_chunks
+        if milvus_count is not None and docstore_ready
+        else None
+    )
+
+    if not docstore_ready:
+        status = "missing_docstore"
     elif milvus_error:
         status = "missing_milvus" if not milvus_connected else "missing_milvus_collection"
+    elif aligned is False:
+        status = "index_out_of_sync"
     else:
         status = "ok"
+
     return HealthResponse(
         status=status,
-        index_exists=index_exists,
+        index_exists=docstore_ready,
         index_loaded=loaded_index is not None,
         index=index_info(loaded_index) if loaded_index is not None else None,
+        docstore_exists=bool(docstore_status.get("exists")),
+        docstore_readable=bool(docstore_status.get("readable")),
+        docstore_path=docstore_status.get("docstore_path"),
+        docstore_chunks=docstore_chunks,
+        docstore_error=docstore_status.get("error"),
         milvus_configured=True,
         milvus_connected=milvus_connected,
         milvus_collection=DEFAULT_MILVUS_COLLECTION,
+        milvus_entity_count=milvus_count,
+        milvus_aligned_with_docstore=aligned,
         milvus_error=milvus_error,
     )
 
@@ -98,7 +114,6 @@ def ask(request: AskRequest) -> AskResponse:
     """Answer a user question using retrieval plus optional LLM generation."""
 
     config = GenerationConfig(
-        index_backend=request.index_backend,
         milvus_uri=request.milvus_uri,
         milvus_collection=request.milvus_collection,
         top_k=request.top_k,
@@ -130,13 +145,12 @@ def ask(request: AskRequest) -> AskResponse:
     try:
         result = answer_question(
             request.question,
-            index_dir=DEFAULT_INDEX_DIR,
+            docstore_path=DEFAULT_DOCSTORE_PATH,
             embedding_model=DEFAULT_EMBEDDING_MODEL,
             config=config,
-            vector_index=get_index(
-                index_backend=request.index_backend,
-                milvus_uri=request.milvus_uri,
-                milvus_collection=request.milvus_collection,
+            vector_index=get_milvus_index(
+                uri=request.milvus_uri,
+                collection_name=request.milvus_collection,
             ),
         )
     except Exception as exc:  # noqa: BLE001 - convert service failures to API errors.
@@ -149,7 +163,6 @@ def search(request: SearchRequest) -> SearchResponse:
     """Return retrieval evidence without calling the LLM."""
 
     config = GenerationConfig(
-        index_backend=request.index_backend,
         milvus_uri=request.milvus_uri,
         milvus_collection=request.milvus_collection,
         top_k=request.top_k,
@@ -177,13 +190,12 @@ def search(request: SearchRequest) -> SearchResponse:
     try:
         result = answer_question(
             request.query,
-            index_dir=DEFAULT_INDEX_DIR,
+            docstore_path=DEFAULT_DOCSTORE_PATH,
             embedding_model=DEFAULT_EMBEDDING_MODEL,
             config=config,
-            vector_index=get_index(
-                index_backend=request.index_backend,
-                milvus_uri=request.milvus_uri,
-                milvus_collection=request.milvus_collection,
+            vector_index=get_milvus_index(
+                uri=request.milvus_uri,
+                collection_name=request.milvus_collection,
             ),
         )
     except Exception as exc:  # noqa: BLE001 - convert service failures to API errors.
@@ -210,10 +222,10 @@ def search(request: SearchRequest) -> SearchResponse:
 
 @app.post("/ingest", response_model=IngestResponse)
 def ingest(request: IngestRequest) -> IngestResponse:
-    """Load the saved index or rebuild it from the current corpus."""
+    """Load the saved Milvus index or rebuild SQLite docstore plus Milvus."""
 
     try:
-        vector_index = refresh_vector_index(
+        milvus_index, milvus_summary = refresh_milvus_index(
             rebuild=request.rebuild,
             priority=request.priority,
             include_visual_evidence=request.include_visual_evidence,
@@ -230,44 +242,21 @@ def ingest(request: IngestRequest) -> IngestResponse:
     except Exception as exc:  # noqa: BLE001 - convert service failures to API errors.
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    docstore_status = inspect_docstore(DEFAULT_DOCSTORE_PATH)
     action = "rebuilt" if request.rebuild else "loaded"
+    ingest_run_id = (docstore_status.get("metadata") or {}).get("ingest_run_id")
     return IngestResponse(
         status="ok",
-        message=f"Vector index {action}.",
-        index=index_info(vector_index),
+        message=f"SQLite docstore and Milvus collection {action}.",
+        ingest_run_id=ingest_run_id,
+        docstore=summarize_docstore_status(docstore_status),
+        milvus=milvus_summary,
+        index=index_info(milvus_index),
     )
 
 
-def get_index(
-    *,
-    index_backend: str,
-    milvus_uri: str,
-    milvus_collection: str,
-) -> CourseVectorIndex | MilvusTextIndex:
-    if index_backend == "faiss":
-        return get_vector_index()
-    if index_backend == "milvus":
-        return get_milvus_index(uri=milvus_uri, collection_name=milvus_collection)
-    raise ValueError(f"unsupported index_backend: {index_backend}")
-
-
-def get_vector_index() -> CourseVectorIndex:
-    global _vector_index
-    if _vector_index is not None:
-        return _vector_index
-
-    with _index_lock:
-        if _vector_index is None:
-            _vector_index = build_or_load_vector_index(
-                index_dir=DEFAULT_INDEX_DIR,
-                model_name=DEFAULT_EMBEDDING_MODEL,
-                show_progress_bar=False,
-            )
-    return _vector_index
-
-
 def get_milvus_index(*, uri: str, collection_name: str) -> MilvusTextIndex:
-    key = (uri, collection_name)
+    key = (safe_path(DEFAULT_DOCSTORE_PATH), uri, collection_name)
     cached = _milvus_indexes.get(key)
     if cached is not None:
         return cached
@@ -276,7 +265,7 @@ def get_milvus_index(*, uri: str, collection_name: str) -> MilvusTextIndex:
         cached = _milvus_indexes.get(key)
         if cached is None:
             cached = build_or_load_milvus_text_index(
-                index_dir=DEFAULT_INDEX_DIR,
+                docstore_path=DEFAULT_DOCSTORE_PATH,
                 model_name=DEFAULT_EMBEDDING_MODEL,
                 uri=uri,
                 collection_name=collection_name,
@@ -285,7 +274,7 @@ def get_milvus_index(*, uri: str, collection_name: str) -> MilvusTextIndex:
     return cached
 
 
-def refresh_vector_index(
+def refresh_milvus_index(
     *,
     rebuild: bool,
     priority: str = "mvp,v2",
@@ -299,50 +288,79 @@ def refresh_vector_index(
     ocr_max_pdf_pages: int | None = None,
     pdf_page_low_text_chars: int = 80,
     caption_max_items: int | None = None,
-) -> CourseVectorIndex:
-    global _vector_index
+) -> tuple[MilvusTextIndex, dict[str, Any]]:
     with _index_lock:
-        _vector_index = build_or_load_vector_index(
-            index_dir=DEFAULT_INDEX_DIR,
+        if rebuild:
+            milvus_summary = rebuild_milvus_text_index(
+                docstore_path=DEFAULT_DOCSTORE_PATH,
+                model_name=DEFAULT_EMBEDDING_MODEL,
+                uri=DEFAULT_MILVUS_URI,
+                collection_name=DEFAULT_MILVUS_COLLECTION,
+                batch_size=DEFAULT_MILVUS_BATCH_SIZE,
+                drop_existing=True,
+                rebuild_docstore=True,
+                priority=priority,
+                include_visual_evidence=include_visual_evidence,
+                include_table_evidence=include_table_evidence,
+                run_ocr=run_ocr,
+                ocr_provider=ocr_provider,
+                run_caption=run_caption,
+                caption_provider=caption_provider,
+                visual_limit=visual_limit,
+                ocr_max_pdf_pages=ocr_max_pdf_pages,
+                pdf_page_low_text_chars=pdf_page_low_text_chars,
+                caption_max_items=caption_max_items,
+            )
+            _milvus_indexes.clear()
+        else:
+            milvus_summary = {"backend": "milvus", "loaded": True}
+
+        milvus_index = build_or_load_milvus_text_index(
+            docstore_path=DEFAULT_DOCSTORE_PATH,
             model_name=DEFAULT_EMBEDDING_MODEL,
-            rebuild=rebuild,
-            show_progress_bar=False,
-            priority=priority,
-            include_visual_evidence=include_visual_evidence,
-            include_table_evidence=include_table_evidence,
-            run_ocr=run_ocr,
-            ocr_provider=ocr_provider,
-            run_caption=run_caption,
-            caption_provider=caption_provider,
-            visual_limit=visual_limit,
-            ocr_max_pdf_pages=ocr_max_pdf_pages,
-            pdf_page_low_text_chars=pdf_page_low_text_chars,
-            caption_max_items=caption_max_items,
+            uri=DEFAULT_MILVUS_URI,
+            collection_name=DEFAULT_MILVUS_COLLECTION,
         )
-        _milvus_indexes.clear()
-    return _vector_index
+        key = (safe_path(DEFAULT_DOCSTORE_PATH), DEFAULT_MILVUS_URI, DEFAULT_MILVUS_COLLECTION)
+        _milvus_indexes[key] = milvus_index
+        milvus_summary = {
+            "backend": "milvus",
+            "collection_name": DEFAULT_MILVUS_COLLECTION,
+            "milvus_uri": DEFAULT_MILVUS_URI,
+            "milvus_schema_version": DEFAULT_MILVUS_SCHEMA_VERSION,
+            "entity_count": milvus_index.index.ntotal,
+            **milvus_summary,
+        }
+    return milvus_index, milvus_summary
 
 
-def default_milvus_health() -> tuple[bool, str | None]:
+def default_milvus_health() -> tuple[bool, str | None, int | None]:
     try:
         client = create_milvus_client(DEFAULT_MILVUS_URI)
         has_collection = client.has_collection(DEFAULT_MILVUS_COLLECTION)
     except Exception as exc:  # noqa: BLE001 - health should return diagnostics, not 500.
-        return False, milvus_connection_error(DEFAULT_MILVUS_URI, exc)
+        message = str(exc)
+        if not message.startswith("Cannot connect to Milvus"):
+            message = milvus_connection_error(DEFAULT_MILVUS_URI, exc)
+        return False, message, None
     if not has_collection:
         return (
             True,
             f"Milvus collection not found: {DEFAULT_MILVUS_COLLECTION}. "
             r"Run `powershell -ExecutionPolicy Bypass -File "
             r"course_rag\scripts\milvus_rebuild_index.ps1` after Milvus is up.",
+            None,
         )
-    return True, None
+    try:
+        return True, None, milvus_entity_count(client, DEFAULT_MILVUS_COLLECTION)
+    except Exception as exc:  # noqa: BLE001 - health should expose collection diagnostics.
+        return True, str(exc), None
 
 
-def first_loaded_index() -> CourseVectorIndex | MilvusTextIndex | None:
+def first_loaded_index() -> MilvusTextIndex | None:
     if _milvus_indexes:
         return next(iter(_milvus_indexes.values()))
-    return _vector_index
+    return None
 
 
 def normalize_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -358,14 +376,35 @@ def normalize_result(result: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def index_info(vector_index: CourseVectorIndex | MilvusTextIndex) -> IndexInfo:
+def summarize_docstore_status(status: dict[str, Any]) -> dict[str, Any]:
+    metadata = status.get("metadata") or {}
+    return {
+        "exists": bool(status.get("exists")),
+        "readable": bool(status.get("readable")),
+        "docstore_path": status.get("docstore_path"),
+        "documents": status.get("documents"),
+        "evidence_count": status.get("evidence"),
+        "parents": status.get("parents"),
+        "chunks": status.get("chunks"),
+        "chunk_parent_mappings": status.get("chunk_parent_mappings"),
+        "ingest_run_id": metadata.get("ingest_run_id"),
+        "docstore_schema_version": metadata.get("docstore_schema_version"),
+        "error": status.get("error"),
+    }
+
+
+def index_info(vector_index: MilvusTextIndex) -> IndexInfo:
     return IndexInfo(
-        index_dir=safe_path(DEFAULT_INDEX_DIR),
+        docstore_path=safe_path(vector_index.config.docstore_path),
         vectors=vector_index.index.ntotal,
         embedding_model=vector_index.metadata.get("embedding_model"),
-        backend=vector_index.metadata.get("index_backend", "faiss"),
+        backend="milvus",
         collection_name=vector_index.metadata.get("milvus_collection"),
         milvus_uri=vector_index.metadata.get("milvus_uri"),
+        documents=vector_index.docstore_index.counts.get("documents"),
+        chunks=vector_index.docstore_index.counts.get("chunks", len(vector_index.chunks)),
+        parents=vector_index.docstore_index.counts.get("parents", len(vector_index.parents)),
+        evidence_count=vector_index.docstore_index.counts.get("evidence"),
     )
 
 

@@ -8,9 +8,6 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Any
 
-from .indexing import CourseVectorIndex
-
-
 PAGE_PATTERNS = (
     re.compile(r"(?:第\s*)?(\d{1,4})\s*页"),
     re.compile(r"\bpage\s*[:#-]?\s*(\d{1,4})\b", flags=re.IGNORECASE),
@@ -106,7 +103,7 @@ class QueryRoute:
 
 def build_query_route(
     query: str,
-    vector_index: CourseVectorIndex,
+    vector_index: Any,
     *,
     explicit_filters: MetadataFilters | None = None,
     enabled: bool = True,
@@ -310,7 +307,7 @@ def infer_category(query: str) -> str | None:
     return None
 
 
-def infer_source_name(query: str, vector_index: CourseVectorIndex) -> str | None:
+def infer_source_name(query: str, vector_index: Any) -> str | None:
     normalized_query = compact_text(query)
     if len(normalized_query) < 4:
         return None
@@ -355,7 +352,7 @@ def detect_intents(
     return dedupe_keep_order(intents)
 
 
-def source_options(vector_index: CourseVectorIndex) -> list[tuple[str, str]]:
+def source_options(vector_index: Any) -> list[tuple[str, str]]:
     seen: dict[str, str] = {}
     for chunk in vector_index.chunks:
         metadata = chunk.metadata

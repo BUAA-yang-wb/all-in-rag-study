@@ -7,7 +7,5 @@ uvicorn
 langchain-text-splitters
 langchain-openai
 python-dotenv
-faiss-cpu
 sentence-transformers
-rank-bm25
 pymilvus

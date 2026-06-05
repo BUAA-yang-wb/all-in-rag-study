@@ -14,7 +14,7 @@ if (-not (Test-Path $Python)) {
     throw "Project Python not found: $Python"
 }
 
-& $Python -X utf8 $Indexer --uri $MilvusUri --collection $Collection --batch-size $BatchSize --drop-existing
+& $Python -X utf8 $Indexer --uri $MilvusUri --collection $Collection --batch-size $BatchSize --drop-existing --rebuild-docstore
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

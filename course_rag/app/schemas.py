@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 RetrievalStrategy = Literal["hybrid", "dense", "bm25"]
-IndexBackend = Literal["faiss", "milvus"]
 
 
 class Citation(BaseModel):
@@ -59,17 +58,22 @@ class RetrievalItem(Citation):
 
 
 class IndexInfo(BaseModel):
-    index_dir: str
+    docstore_path: str
     vectors: int
     embedding_model: str | None = None
-    backend: str = "faiss"
+    backend: str = "milvus"
     collection_name: str | None = None
     milvus_uri: str | None = None
+    documents: int | None = None
+    chunks: int | None = None
+    parents: int | None = None
+    evidence_count: int | None = None
 
 
 class AskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     question: str = Field(..., min_length=1)
-    index_backend: IndexBackend = "milvus"
     milvus_uri: str = "http://localhost:19530"
     milvus_collection: str = "course_rag_v2_text"
     top_k: int = Field(default=5, ge=1, le=20)
@@ -119,8 +123,9 @@ class AskResponse(BaseModel):
 
 
 class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str = Field(..., min_length=1)
-    index_backend: IndexBackend = "milvus"
     milvus_uri: str = "http://localhost:19530"
     milvus_collection: str = "course_rag_v2_text"
     top_k: int = Field(default=5, ge=1, le=20)
@@ -180,6 +185,9 @@ class IngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     status: str
     message: str
+    ingest_run_id: str | None = None
+    docstore: dict[str, Any] = Field(default_factory=dict)
+    milvus: dict[str, Any] = Field(default_factory=dict)
     index: IndexInfo | None = None
 
 
@@ -188,9 +196,16 @@ class HealthResponse(BaseModel):
     index_exists: bool
     index_loaded: bool
     index: IndexInfo | None = None
+    docstore_exists: bool = False
+    docstore_readable: bool = False
+    docstore_path: str | None = None
+    docstore_chunks: int = 0
+    docstore_error: str | None = None
     milvus_configured: bool = True
     milvus_connected: bool = False
     milvus_collection: str | None = None
+    milvus_entity_count: int | None = None
+    milvus_aligned_with_docstore: bool | None = None
     milvus_error: str | None = None
 
 

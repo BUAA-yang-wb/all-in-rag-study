@@ -15,9 +15,9 @@ LoadedDocument
 -> EvidenceDocument(text/native_text)
 -> Image evidence / OCR evidence / optional caption evidence
 -> ParentDocument / ChunkedDocument
--> BAAI/bge-small-zh-v1.5 + Milvus dense backend
--> FAISS baseline 保留为导入源和 fallback
--> BM25 hybrid + RRF
+-> SQLite docstore 保存 documents / evidence / parents / chunks
+-> Milvus collection 保存 chunk_id / dense_vector / search_text / sparse_vector
+-> Milvus dense + BM25 sparse/full-text hybrid + RRF
 -> metadata routing + filter/boost
 -> 默认 bge-reranker-base rerank
 -> FastAPI /ask /search
@@ -29,7 +29,7 @@ LoadedDocument
 - 文档加载：Markdown、文本层 PDF、DOCX 等文本资料。
 - 父子 chunk：child chunk 用于检索，parent document 用于生成上下文。
 - 检索：dense、BM25、hybrid 三种策略，默认 hybrid。
-- 数据库后端：Milvus standalone 已作为默认 dense 检索后端，FAISS 保留为显式 fallback。
+- 存储后端：SQLite docstore 作为本地 source of truth，Milvus standalone 作为唯一在线检索索引。
 - 精排：默认开启 `BAAI/bge-reranker-base`。
 - routing：已支持课程、文件、页码、证据类型等可选过滤与调试返回。
 - API：`/ask`、`/search`、`/ingest`、`/health`。
@@ -38,13 +38,13 @@ LoadedDocument
 - V2 visual evidence：已支持独立图片、Markdown `image_refs`、RapidOCR OCR 缓存和可选 caption provider；当前默认索引已包含图片 metadata/image_ref 和 OCR evidence，未包含 caption evidence。
 - V2 table evidence：已支持 Docling JSON 表格优先、Markdown/PDF 类表格文本兜底的混合抽取策略。
 
-当前文本链路已经足够作为 V2 的稳定 baseline。Milvus 已进入默认在线检索后端，但仍复用当前 FAISS baseline 产物导入；FAISS 不删除，继续作为低资源开发和对比评测 fallback。
+当前文本链路已经足够作为 V2 的稳定主链路。系统已切换为 SQLite docstore + Milvus hybrid retrieval：SQLite 保存完整文档、evidence、parent、chunk 和 ingest run，Milvus 保存 chunk 级 dense/BM25 sparse 检索索引和必要过滤字段。
 
 当前已构建索引的实际状态：
 
 | 项 | 当前值 |
 | --- | --- |
-| 索引更新时间 | 2026-06-04 09:55:42 |
+| 索引更新时间 | 2026-06-05 18:01 |
 | priority 范围 | `mvp,v2` |
 | evidence 总数 | 5724 |
 | native_text evidence | 4243 |
@@ -54,10 +54,12 @@ LoadedDocument
 | table evidence | 139 |
 | caption evidence | 0；默认关闭 |
 | chunk / parent 数量 | 9138 chunks / 5840 parents |
-| 来源文件数 | 263 |
+| docstore documents | 84 |
+| 默认 docstore | `course_rag/data/rag_store.sqlite` |
 | 默认在线后端 | Milvus collection `course_rag_v2_text` |
 | Milvus entity_count | 9138 |
-| FAISS fallback | 保留，可显式传 `index_backend="faiss"` |
+| docstore chunks | 9138 |
+| docstore parents | 5840 |
 
 本地环境约束：
 
@@ -149,7 +151,7 @@ VLM 模型选择：
 
 - 把文本、PDF 页、图片、表格统一成同一种可处理对象。
 - 让 citation 可以追溯到 `source + page` 或 `asset_path`。
-- 后续替换索引后端、接入 OCR/VLM/Milvus 时，不需要重写 loader 与生成层的核心语义。
+- 后续调整检索索引、接入 OCR/VLM 等能力时，不需要重写 loader 与生成层的核心语义。
 - 支持对不同证据类型采用不同 chunk、索引、召回和展示策略。
 
 建议字段：
@@ -252,7 +254,7 @@ context_after
 - Markdown、文本层 PDF、DOCX 的正文先转换为 text evidence。
 - 原有 parent-child chunk 策略继续保留。
 - `source`、`page`、`section_path` 等元数据从 evidence 透传到 chunk。
-- 默认索引目录已切换为 `course_rag/vector_index_v2_text/`。
+- 默认主状态已切换为 SQLite docstore，路径为 `course_rag/data/rag_store.sqlite`。
 
 验收标准：
 
@@ -448,9 +450,10 @@ context_after
 
 当前状态：
 
-- 已完成 21 条人工金标样本的默认外部 LLM 评测。
-- 最近一次评测 `evidence_hit@k=1`、`evidence_recall@k=0.9211`、`citation_coverage=1`、`answer_fact_coverage=0.9868`。
-- 主要问题是 OCR evidence 的召回覆盖和排序偏弱，以及部分复杂概念题生成答案不够完整。
+- 已在当前 SQLite docstore + Milvus 主链路上完成 21 条人工金标样本的 `profile=fast` 诊断。
+- 最近一次 fast 诊断 `error_rate=0`、`llm_error_rate=0`、`evidence_hit@k=0.8421`、`evidence_recall@k=0.7632`、`citation_validity=0.9524`。
+- 默认外部 LLM 评测需要在当前新链路上重新运行后再更新指标。
+- 主要问题是 OCR evidence 的召回覆盖和排序偏弱、部分复杂概念题命中不够稳定，以及资料不足样本的离线拒答仍需优化。
 
 风险：
 
@@ -458,47 +461,51 @@ context_after
 - V2 资料中图片和扫描页多，人工验证需要看原图或页图。
 - 外部 LLM 评测受网络、API key 和模型稳定性影响，因此仍保留 `profile=fast` 作为离线诊断入口。
 
-### 阶段 9：Milvus 数据库后端（已完成主线化与本机验证）
+### 阶段 9：SQLite Docstore + Milvus Hybrid 主链路（已完成并本机验证）
 
 目标：
 
-- 在 evidence 层稳定后，把在线 dense 检索后端从本地 FAISS baseline 主线化到 Milvus。
-- Milvus 作为默认文本 evidence 向量数据库后端；FAISS 保留为显式 fallback 和导入源。
+- SQLite docstore 作为本地 source of truth，保存 documents、evidence、parents、chunks、chunk-parent 映射和 ingest run。
+- Milvus standalone 作为唯一在线检索索引，保存 chunk_id、dense vector、BM25 sparse/full-text 字段和必要过滤字段。
+- 在线查询固定走 Milvus dense/BM25/hybrid search，再回 SQLite 取 parent context、citation 和调试信息。
 - 本阶段不实施页面图向量、图片向量、ColPali、ColQwen 或任何视觉检索入口。
 
 主要改动点：
 
-- 使用 Milvus standalone 作为本地默认向量数据库。
-- collection 包含 chunk 主键、parent 关联、常用 metadata 标量字段、完整 metadata JSON、文本内容和文本 dense 向量。
-- `/ask`、`/search` 和评测脚本默认 `index_backend="milvus"`，可显式传 `index_backend="faiss"` 使用 fallback。
-- `dense` 使用所选后端；`bm25` 继续使用本地内存 BM25；`hybrid` 使用所选 dense 后端和本地 BM25 做 RRF。
-- 新增 Milvus Docker Compose、启动/停止/重建/检查脚本，并支持 FAISS/Milvus 快速评测对比。
+- 新增 `course_rag/app/rag/docstore.py`，默认 SQLite 路径为 `course_rag/data/rag_store.sqlite`。
+- `indexing.py` 收敛为语料/evidence/chunk 构建与 docstore 写入，不再承担在线向量索引角色。
+- `milvus_index.py` 从 SQLite docstore 重建 collection，collection 包含 `chunk_id`、`dense_vector`、`search_text`、`sparse_vector`、常用 scalar 字段和 `metadata` JSON。
+- `search_text` 开启 analyzer，并通过 Milvus BM25 Function 自动生成 sparse vector。
+- `dense`、`bm25`、`hybrid` 三种策略均由 Milvus 执行；`hybrid` 默认使用 `RRFRanker`。
+- API、前端和评测脚本固定使用 Milvus 检索索引，不提供检索后端切换参数。
+- `/health` 返回 docstore 可读性、chunk 数、Milvus 连接、entity_count 和两者是否对齐。
+- `/ingest(rebuild=true)` 会重建 SQLite docstore，并重建 Milvus collection。
 
 当前状态：
 
-- Docker Compose 配置已加入 `course_rag/deploy/milvus/docker-compose.yml`。
-- 本机已实际拉取并启动 `milvus-standalone`、`milvus-etcd`、`milvus-minio`。
-- 三个容器已验证为 `healthy`。
-- 已从 `course_rag/vector_index_v2_text/` 重建 Milvus collection。
-- `course_rag_v2_text` 当前 `entity_count=9138`，与 chunk 数一致。
-- `/health` 已验证返回 `status=ok`、`milvus_connected=true`。
-- 默认 `/search` 已验证返回 `index.backend="milvus"`。
-- 默认 `/ask(use_llm=false)` 已验证返回 `index.backend="milvus"`。
-- 显式 `index_backend="faiss"` 已验证可用。
-- `profile=fast` Milvus 评测已跑通，`error_rate=0`。
-- Milvus/FAISS 对比评测已跑通，Top-K overlap 平均值 `0.9895`，Top-1 变化率 `0`。
+- Docker Compose 配置位于 `course_rag/deploy/milvus/docker-compose.yml`。
+- 本机已实际启动 `milvus-standalone`、`milvus-etcd`、`milvus-minio`。
+- SQLite docstore 已生成，默认路径为 `course_rag/data/rag_store.sqlite`。
+- `course_rag_v2_text` 当前 `entity_count=9138`，与 docstore chunks 数一致。
+- `/health` 已验证返回 `status=ok`、`docstore_readable=true`、`milvus_connected=true`、`milvus_aligned_with_docstore=true`。
+- `/ingest {"rebuild": false}` 已验证能加载当前 docstore 与 collection。
+- `/search` 已验证 `dense`、`bm25`、`hybrid` 三种策略均能返回合法 citation。
+- `/ask(use_llm=false)` 已验证可返回 parent context 与 citation。
+- 默认 rerank 已验证可用，`rerank_used=true`。
+- `profile=fast` 评测已跑通，`error_rate=0`、`llm_error_rate=0`。
 
 验收标准：
 
-- FAISS baseline 仍可运行。已验证。
-- Milvus 文本 evidence 检索结果能与 FAISS baseline 对比。已验证。
-- 不传 `index_backend` 时 API 和评测默认使用 Milvus；Milvus 不可用时返回清晰错误，不静默回退 FAISS。已实现并验证。
+- SQLite docstore 表结构可读，metadata JSON、chunk-parent 映射和重复重建覆盖语义正常。已验证。
+- Milvus collection entity_count 与 docstore chunk 数一致。已验证。
+- 三种检索策略均能通过 API 返回合法 `chunk_id`。已验证。
+- 公开请求 schema 固定为 Milvus + docstore 视角。已验证。
 
 风险：
 
 - Docker 和 Milvus 会提高本地环境复杂度。
-- 过早迁移会掩盖 evidence 抽取质量问题。
-- Milvus collection 如果没有随 FAISS baseline 重建同步刷新，可能出现向量数量或 metadata 不一致。
+- SQLite 与 Milvus 必须由同一次 ingest/rebuild 生成，否则可能出现 entity_count 或 metadata 不一致。
+- BM25 analyzer 与中文/中英混合课程资料的分词质量仍需结合评测继续观察。
 
 ## 5. 近期优先级
 
@@ -509,12 +516,11 @@ context_after
 - 阶段 5 已完成 OCR 缓存构建并进入默认索引，当前已有 998 条 `ocr_text`。
 - 阶段 6 caption provider 已接入但默认关闭，当前索引没有 caption evidence。
 - 阶段 7 已完成 table evidence 并进入默认索引，当前已有 139 条 `table_markdown`。
-- 阶段 8 新评测体系已完成初版，阶段 9 Milvus 数据库后端已完成主线化配置和本机实际验证；视觉检索不进入本阶段范围。
+- 阶段 8 新评测体系已完成初版，阶段 9 SQLite docstore + Milvus hybrid 主链路已完成配置和本机实际验证；视觉检索不进入本阶段范围。
 
 近期不建议优先做：
 
 - 直接替换 `BAAI/bge-small-zh-v1.5`。
-- 删除 FAISS fallback。
 - 直接上完整多模态生成。
 - 在线 `/ask` 实时调用 VLM。
 - 只把图片 OCR 后当普通文本塞进现有索引。
@@ -525,7 +531,7 @@ context_after
 2. 抽样检查 OCR/table evidence 的质量，清理明显误抽或低价值 evidence。
 3. 继续扩展 V2 golden set，增加更多指定页码、题号、流程图和跨 evidence 综合问题。
 4. 如确实需要视觉语义理解，再配置并小样本验证 `Qwen3-VL-2B-Instruct-GGUF` caption。
-5. 基于已跑通的 Milvus/FAISS 对比评测，继续观察后续索引重建后的 overlap、延迟和失败样本；视觉检索暂不实施。
+5. 基于当前 Milvus fast eval，继续观察后续索引重建后的 evidence hit、recall、MRR、延迟和失败样本；视觉检索暂不实施。
 
 这样可以在 Milvus 已成为默认在线后端的基础上，继续把 OCR/table evidence 做成可评测、可迭代的稳定能力；视觉检索暂不纳入当前实施范围。
 

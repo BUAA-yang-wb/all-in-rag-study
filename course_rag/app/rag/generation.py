@@ -1,18 +1,16 @@
-"""Question answering over the local course RAG vector index."""
+"""Question answering over the Milvus-backed course RAG index."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from .indexing import (
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_INDEX_DIR,
-    CourseVectorIndex,
-    build_or_load_vector_index,
 )
+from .docstore import DEFAULT_DOCSTORE_PATH
 from .milvus_index import (
     DEFAULT_MILVUS_COLLECTION,
     DEFAULT_MILVUS_URI,
@@ -46,14 +44,12 @@ from .routing import (
 DEFAULT_LLM_MODEL = "deepseek-v4-pro"
 DEFAULT_LLM_BASE_URL = "https://api.deepseek.com"
 DEFAULT_API_KEY_ENV = "DEEPSEEK_API_KEY_RAGLEARN"
-IndexBackend = Literal["faiss", "milvus"]
 
 
 @dataclass(frozen=True)
 class GenerationConfig:
     """Runtime settings for one RAG answer request."""
 
-    index_backend: IndexBackend = "milvus"
     milvus_uri: str = DEFAULT_MILVUS_URI
     milvus_collection: str = DEFAULT_MILVUS_COLLECTION
     top_k: int = 5
@@ -89,7 +85,7 @@ class GenerationConfig:
 def answer_question(
     question: str,
     *,
-    index_dir: Path = DEFAULT_INDEX_DIR,
+    docstore_path: Path = DEFAULT_DOCSTORE_PATH,
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     config: GenerationConfig | None = None,
     vector_index: Any | None = None,
@@ -101,12 +97,11 @@ def answer_question(
         raise ValueError("question must not be empty")
 
     selected_config = config or GenerationConfig()
-    active_index = vector_index or load_index_for_backend(
-        index_backend=selected_config.index_backend,
-        index_dir=index_dir,
-        embedding_model=embedding_model,
-        milvus_uri=selected_config.milvus_uri,
-        milvus_collection=selected_config.milvus_collection,
+    active_index = vector_index or build_or_load_milvus_text_index(
+        docstore_path=docstore_path,
+        model_name=embedding_model,
+        uri=selected_config.milvus_uri,
+        collection_name=selected_config.milvus_collection,
     )
 
     active_retriever = retriever or get_course_retriever(active_index)
@@ -132,13 +127,28 @@ def answer_question(
         candidate_k = min(len(active_index.chunks), max(candidate_k, 100))
 
     retrieval_query = build_routed_retrieval_query(question, route)
+    milvus_filters = route_filter_values(route)
+    milvus_filter_fallback = False
     raw_results = active_retriever.search(
         retrieval_query,
         strategy=selected_config.retrieval_strategy,
         top_k=candidate_k,
         rrf_k=selected_config.rrf_k,
+        filters=milvus_filters,
     )
+    if milvus_filters and not raw_results:
+        milvus_filter_fallback = True
+        raw_results = active_retriever.search(
+            retrieval_query,
+            strategy=selected_config.retrieval_strategy,
+            top_k=candidate_k,
+            rrf_k=selected_config.rrf_k,
+            filters={},
+        )
     raw_results, routing_debug = apply_metadata_routing(raw_results, route)
+    if milvus_filters:
+        routing_debug["milvus_filter_pushdown"] = milvus_filters
+        routing_debug["milvus_filter_fallback"] = milvus_filter_fallback
     had_rerank_candidates = bool(raw_results)
     rerank_error: str | None = None
     rerank_used = False
@@ -213,11 +223,8 @@ def answer_question(
         "rerank_error": rerank_error,
         "routing": routing_debug,
         "pipeline": [
-            f"load_{index_backend_name(active_index, selected_config)}_index",
-            *retrieval_pipeline_steps(
-                selected_config.retrieval_strategy,
-                index_backend=index_backend_name(active_index, selected_config),
-            ),
+            "load_milvus_index",
+            *retrieval_pipeline_steps(selected_config.retrieval_strategy),
             *metadata_routing_pipeline_steps(routing_debug),
             *rerank_pipeline_steps(
                 use_rerank=selected_config.use_rerank,
@@ -231,42 +238,22 @@ def answer_question(
             "llm_generation" if used_llm else "retrieval_only_fallback",
         ],
         "index": {
-            "index_dir": safe_path(index_dir),
+            "docstore_path": safe_path(docstore_path),
             "vectors": active_index.index.ntotal,
             "embedding_model": active_index.metadata.get("embedding_model"),
-            "backend": index_backend_name(active_index, selected_config),
+            "backend": "milvus",
             "collection_name": active_index.metadata.get("milvus_collection"),
             "milvus_uri": active_index.metadata.get("milvus_uri"),
+            "documents": active_index.docstore_index.counts.get("documents"),
+            "chunks": active_index.docstore_index.counts.get("chunks", len(active_index.chunks)),
+            "parents": active_index.docstore_index.counts.get("parents", len(active_index.parents)),
+            "evidence_count": active_index.docstore_index.counts.get("evidence"),
         },
     }
 
 
-def load_index_for_backend(
-    *,
-    index_backend: IndexBackend,
-    index_dir: Path,
-    embedding_model: str,
-    milvus_uri: str,
-    milvus_collection: str,
-) -> Any:
-    if index_backend == "faiss":
-        return build_or_load_vector_index(
-            index_dir=index_dir,
-            model_name=embedding_model,
-            show_progress_bar=False,
-        )
-    if index_backend == "milvus":
-        return build_or_load_milvus_text_index(
-            index_dir=index_dir,
-            model_name=embedding_model,
-            uri=milvus_uri,
-            collection_name=milvus_collection,
-        )
-    raise ValueError(f"unsupported index_backend: {index_backend}")
-
-
 def select_contexts(
-    vector_index: CourseVectorIndex,
+    vector_index: MilvusTextIndex,
     raw_results: list[dict[str, Any]],
     *,
     top_k: int,
@@ -301,7 +288,7 @@ def select_contexts(
 
 
 def _select_contexts_once(
-    vector_index: CourseVectorIndex,
+    vector_index: MilvusTextIndex,
     raw_results: list[dict[str, Any]],
     *,
     top_k: int,
@@ -563,23 +550,16 @@ def visible_text_len(text: str) -> int:
 
 def retrieval_pipeline_steps(
     strategy: RetrievalStrategy,
-    *,
-    index_backend: str,
 ) -> list[str]:
-    dense_step = (
-        "milvus_candidate_search"
-        if index_backend == "milvus"
-        else "faiss_candidate_search"
-    )
     if strategy == "dense":
-        return ["encode_query", dense_step]
+        return ["encode_query", "milvus_dense_candidate_search"]
     if strategy == "bm25":
-        return ["bm25_tokenize_query", "bm25_candidate_search"]
+        return ["milvus_bm25_candidate_search"]
     return [
         "encode_query",
-        dense_step,
-        "bm25_candidate_search",
-        "rrf_fusion",
+        "milvus_dense_candidate_search",
+        "milvus_bm25_candidate_search",
+        "milvus_rrf_fusion",
     ]
 
 
@@ -604,6 +584,10 @@ def metadata_routing_pipeline_steps(routing: dict[str, Any]) -> list[str]:
         return []
 
     steps = ["metadata_route_query"]
+    if routing.get("milvus_filter_pushdown"):
+        steps.append("milvus_metadata_filter")
+    if routing.get("milvus_filter_fallback"):
+        steps.append("milvus_filter_fallback")
     if routing.get("filter_applied"):
         steps.append("metadata_filter_candidates")
     if routing.get("filter_fallback"):
@@ -621,13 +605,11 @@ def retrievers_for_strategy(strategy: RetrievalStrategy) -> list[str]:
     return ["dense", "bm25"]
 
 
-def index_backend_name(
-    vector_index: Any,
-    config: GenerationConfig,
-) -> str:
-    if isinstance(vector_index, MilvusTextIndex):
-        return "milvus"
-    return str(vector_index.metadata.get("index_backend") or config.index_backend or "faiss")
+def route_filter_values(route: Any) -> dict[str, Any]:
+    return {
+        **route.explicit_filters.to_dict(),
+        **route.inferred_filters.to_dict(),
+    }
 
 
 def round_optional(value: Any, *, digits: int) -> float | None:

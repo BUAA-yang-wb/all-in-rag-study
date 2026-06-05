@@ -1,4 +1,4 @@
-"""Build and query a local FAISS vector index for the course RAG corpus."""
+"""Build and load the SQLite-backed Course RAG corpus snapshot."""
 
 from __future__ import annotations
 
@@ -7,31 +7,35 @@ import json
 import logging
 import os
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-import faiss
 import numpy as np
 
 try:
+    from .chunking import ChunkedDocument, ChunkingConfig, ParentDocument, chunk_documents
+    from .docstore import (
+        DEFAULT_DOCSTORE_PATH,
+        DOCSTORE_SCHEMA_VERSION,
+        DocstoreSnapshot,
+        has_docstore_snapshot,
+        load_docstore_snapshot,
+        save_docstore_snapshot,
+    )
     from .evidence import (
         DEFAULT_TEXT_EVIDENCE_CACHE_PATH,
         DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
+        EvidenceDocument,
         evidence_to_loaded_documents,
         loaded_documents_to_text_evidence,
         summarize_evidence,
         write_evidence_jsonl,
     )
-    from .chunking import (
-        ChunkedDocument,
-        ChunkingConfig,
-        ParentDocument,
-        chunk_documents,
-    )
     from .loaders import (
         DEFAULT_MANIFEST_PATH as LOADER_DEFAULT_MANIFEST_PATH,
+        LoadedDocument,
         load_documents,
         parse_strategy_arg,
     )
@@ -52,22 +56,27 @@ try:
         build_visual_evidence,
     )
 except ImportError:
+    from chunking import ChunkedDocument, ChunkingConfig, ParentDocument, chunk_documents  # type: ignore
+    from docstore import (  # type: ignore
+        DEFAULT_DOCSTORE_PATH,
+        DOCSTORE_SCHEMA_VERSION,
+        DocstoreSnapshot,
+        has_docstore_snapshot,
+        load_docstore_snapshot,
+        save_docstore_snapshot,
+    )
     from evidence import (  # type: ignore
         DEFAULT_TEXT_EVIDENCE_CACHE_PATH,
         DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
+        EvidenceDocument,
         evidence_to_loaded_documents,
         loaded_documents_to_text_evidence,
         summarize_evidence,
         write_evidence_jsonl,
     )
-    from chunking import (  # type: ignore
-        ChunkedDocument,
-        ChunkingConfig,
-        ParentDocument,
-        chunk_documents,
-    )
     from loaders import (  # type: ignore
         DEFAULT_MANIFEST_PATH as LOADER_DEFAULT_MANIFEST_PATH,
+        LoadedDocument,
         load_documents,
         parse_strategy_arg,
     )
@@ -93,38 +102,54 @@ logger = logging.getLogger(__name__)
 
 COURSE_RAG_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = COURSE_RAG_ROOT.parent
-DEFAULT_INDEX_DIR = COURSE_RAG_ROOT / "vector_index_v2_text"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_COMBINED_EVIDENCE_CACHE_PATH = Path("course_rag/data/processed/evidence_v2.jsonl")
-INDEX_FILE_NAME = "index.faiss"
-CHUNKS_FILE_NAME = "chunks.jsonl"
-PARENTS_FILE_NAME = "parents.jsonl"
-PARENT_CHILD_MAP_FILE_NAME = "parent_child_map.json"
-META_FILE_NAME = "index_meta.json"
 
 
-class CourseVectorIndex:
-    """FAISS index plus the chunk metadata needed for traceable retrieval."""
+@dataclass
+class CourseCorpus:
+    """Freshly built corpus state before Milvus indexing."""
+
+    source_documents: list[LoadedDocument]
+    evidence_documents: list[EvidenceDocument]
+    chunks: list[ChunkedDocument]
+    parents: list[ParentDocument]
+    parent_child_map: dict[str, str]
+    metadata: dict[str, Any]
+    model_name: str
+    model_cache_root: Path | None = None
+
+
+@dataclass
+class _IndexStats:
+    ntotal: int
+
+
+class CourseDocstoreIndex:
+    """SQLite docstore snapshot plus embedding model configuration."""
 
     def __init__(
         self,
         *,
-        index: faiss.Index,
         chunks: list[ChunkedDocument],
         parents: list[ParentDocument],
         parent_child_map: dict[str, str],
         metadata: dict[str, Any],
         model_name: str,
         model_cache_root: Path | None = None,
+        docstore_path: Path = DEFAULT_DOCSTORE_PATH,
+        counts: dict[str, int] | None = None,
     ) -> None:
-        self.index = index
         self.chunks = chunks
         self.parents = parents
         self.parent_child_map = parent_child_map
         self.metadata = metadata
         self.model_name = model_name
         self.model_cache_root = model_cache_root
+        self.docstore_path = docstore_path
+        self.counts = counts or {}
         self._embedding_model: Any | None = None
+        self.index = _IndexStats(ntotal=len(chunks))
 
     @property
     def embedding_model(self) -> Any:
@@ -135,45 +160,10 @@ class CourseVectorIndex:
             )
         return self._embedding_model
 
-    def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
-        """Return Top-K chunks with FAISS scores and source metadata."""
 
-        if not query.strip():
-            raise ValueError("query must not be empty")
-        if top_k <= 0:
-            raise ValueError("top_k must be positive")
-        if not self.chunks or self.index.ntotal == 0:
-            return []
-
-        query_vector = encode_texts(
-            self.embedding_model,
-            [query],
-            batch_size=1,
-            show_progress_bar=False,
-        )
-        k = min(top_k, self.index.ntotal)
-        scores, indices = self.index.search(query_vector, k)
-
-        results: list[dict[str, Any]] = []
-        for rank, (score, index_id) in enumerate(zip(scores[0], indices[0]), 1):
-            if index_id < 0:
-                continue
-            chunk = self.chunks[int(index_id)]
-            results.append(
-                {
-                    "rank": rank,
-                    "score": float(score),
-                    "chunk": chunk.to_dict(),
-                    "source": summarize_chunk_source(chunk),
-                    "preview": preview_text(chunk.page_content),
-                }
-            )
-        return results
-
-
-def build_or_load_vector_index(
+def build_or_load_docstore_index(
     *,
-    index_dir: Path = DEFAULT_INDEX_DIR,
+    docstore_path: Path = DEFAULT_DOCSTORE_PATH,
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     manifest_path: Path = REPO_ROOT / LOADER_DEFAULT_MANIFEST_PATH,
     priority: str = "mvp,v2",
@@ -184,9 +174,7 @@ def build_or_load_vector_index(
     chunk_overlap: int = 80,
     use_parent_context: bool = True,
     rebuild: bool = False,
-    batch_size: int = 32,
     strict: bool = False,
-    show_progress_bar: bool = True,
     use_evidence: bool = True,
     evidence_cache_path: Path | None = None,
     evidence_pipeline_version: str = DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
@@ -202,21 +190,19 @@ def build_or_load_vector_index(
     ocr_max_pdf_pages: int | None = None,
     pdf_page_low_text_chars: int = DEFAULT_PDF_PAGE_LOW_TEXT_CHARS,
     caption_max_items: int | None = None,
-) -> CourseVectorIndex:
-    """Load an existing FAISS index or build one from the current corpus."""
+) -> CourseDocstoreIndex:
+    """Load a SQLite docstore snapshot, or rebuild it from the current corpus."""
 
-    resolved_index_dir = resolve_path(index_dir)
+    resolved_docstore_path = resolve_path(docstore_path)
     model_cache_root = default_model_cache_root()
-
-    if not rebuild and has_saved_index(resolved_index_dir):
-        return load_vector_index(
-            index_dir=resolved_index_dir,
+    if not rebuild and has_docstore_snapshot(resolved_docstore_path):
+        return load_docstore_index(
+            docstore_path=resolved_docstore_path,
             model_name=model_name,
             model_cache_root=model_cache_root,
         )
 
-    return build_vector_index(
-        index_dir=resolved_index_dir,
+    corpus = build_course_corpus(
         model_name=model_name,
         manifest_path=resolve_path(manifest_path),
         priority=priority,
@@ -226,9 +212,7 @@ def build_or_load_vector_index(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         use_parent_context=use_parent_context,
-        batch_size=batch_size,
         strict=strict,
-        show_progress_bar=show_progress_bar,
         model_cache_root=model_cache_root,
         use_evidence=use_evidence,
         evidence_cache_path=evidence_cache_path,
@@ -246,11 +230,24 @@ def build_or_load_vector_index(
         pdf_page_low_text_chars=pdf_page_low_text_chars,
         caption_max_items=caption_max_items,
     )
+    save_docstore_snapshot(
+        resolved_docstore_path,
+        source_documents=corpus.source_documents,
+        evidence_documents=corpus.evidence_documents,
+        chunks=corpus.chunks,
+        parents=corpus.parents,
+        parent_child_map=corpus.parent_child_map,
+        metadata=corpus.metadata,
+    )
+    return load_docstore_index(
+        docstore_path=resolved_docstore_path,
+        model_name=model_name,
+        model_cache_root=model_cache_root,
+    )
 
 
-def build_vector_index(
+def build_course_corpus(
     *,
-    index_dir: Path,
     model_name: str,
     manifest_path: Path,
     priority: str,
@@ -260,9 +257,7 @@ def build_vector_index(
     chunk_size: int,
     chunk_overlap: int,
     use_parent_context: bool,
-    batch_size: int,
     strict: bool,
-    show_progress_bar: bool,
     model_cache_root: Path,
     use_evidence: bool,
     evidence_cache_path: Path | None,
@@ -279,15 +274,15 @@ def build_vector_index(
     ocr_max_pdf_pages: int | None,
     pdf_page_low_text_chars: int,
     caption_max_items: int | None,
-) -> CourseVectorIndex:
-    """Build a new FAISS index and persist it to disk."""
+) -> CourseCorpus:
+    """Build documents, evidence, parents, and chunks without writing vectors."""
 
     logger.info("Loading documents from manifest: %s", manifest_path)
     selected_strategies = parse_strategy_arg(strategies)
     text_strategies = set(selected_strategies)
     if include_visual_evidence:
         text_strategies.discard("docling_image")
-    documents = load_documents(
+    source_documents = load_documents(
         manifest_path=manifest_path,
         repo_root=REPO_ROOT,
         priority=priority,
@@ -297,14 +292,17 @@ def build_vector_index(
         strict=strict,
         skip_low_text_pdfs=include_visual_evidence,
     )
+
+    documents_for_chunking: list[LoadedDocument] = list(source_documents)
+    evidence_documents: list[EvidenceDocument] = []
     evidence_stats: dict[str, Any] | None = None
     visual_stats: dict[str, Any] | None = None
     table_stats: dict[str, Any] | None = None
     resolved_text_evidence_cache_path: Path | None = None
     resolved_table_evidence_cache_path: Path | None = None
     resolved_combined_evidence_cache_path: Path | None = None
+
     if use_evidence:
-        source_documents = list(documents)
         evidence_documents = loaded_documents_to_text_evidence(
             source_documents,
             pipeline_version=evidence_pipeline_version,
@@ -360,35 +358,24 @@ def build_vector_index(
         if write_evidence_cache:
             write_evidence_jsonl(resolved_combined_evidence_cache_path, evidence_documents)
             logger.info("Saved combined evidence cache to %s", resolved_combined_evidence_cache_path)
-        documents = evidence_to_loaded_documents(evidence_documents)
+        documents_for_chunking = evidence_to_loaded_documents(evidence_documents)
 
     config = ChunkingConfig(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         use_parent_context=use_parent_context,
     )
-    chunking_result = chunk_documents(documents, config=config)
+    chunking_result = chunk_documents(documents_for_chunking, config=config)
     if not chunking_result.chunks:
-        raise ValueError("No chunks were produced; cannot build a vector index")
-
-    model = load_embedding_model(model_name, model_cache_root=model_cache_root)
-    texts = [chunk.page_content for chunk in chunking_result.chunks]
-    embeddings = encode_texts(
-        model,
-        texts,
-        batch_size=batch_size,
-        show_progress_bar=show_progress_bar,
-    )
-
-    index = faiss.IndexFlatIP(embeddings.shape[1])
-    index.add(embeddings)
+        raise ValueError("No chunks were produced; cannot build the docstore snapshot")
 
     metadata = {
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "retrieval_backend": "milvus",
+        "docstore_schema_version": DOCSTORE_SCHEMA_VERSION,
         "embedding_model": model_name,
-        "embedding_dimension": int(embeddings.shape[1]),
-        "similarity": "cosine_via_normalized_inner_product",
-        "faiss_index_type": "IndexFlatIP",
+        "embedding_dimension": None,
+        "similarity": "cosine_via_normalized_embeddings",
         "manifest_path": safe_repo_relative(manifest_path),
         "priority": priority,
         "strategies": strategies,
@@ -420,9 +407,12 @@ def build_vector_index(
         "table_evidence_stats": table_stats,
         "chunking_config": asdict(config),
         "chunk_stats": chunking_result.stats,
+        "source_documents": len(source_documents),
+        "evidence_documents": len(evidence_documents),
     }
-    vector_index = CourseVectorIndex(
-        index=index,
+    return CourseCorpus(
+        source_documents=source_documents,
+        evidence_documents=evidence_documents,
         chunks=chunking_result.chunks,
         parents=chunking_result.parents,
         parent_child_map=chunking_result.parent_child_map,
@@ -430,83 +420,38 @@ def build_vector_index(
         model_name=model_name,
         model_cache_root=model_cache_root,
     )
-    vector_index._embedding_model = model
-    save_vector_index(vector_index, index_dir)
-    return vector_index
 
 
-def load_vector_index(
+def load_docstore_index(
     *,
-    index_dir: Path,
+    docstore_path: Path = DEFAULT_DOCSTORE_PATH,
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     model_cache_root: Path | None = None,
-) -> CourseVectorIndex:
-    """Load a persisted FAISS index and its JSON metadata files."""
-
-    index_path = index_dir / INDEX_FILE_NAME
-    if not index_path.exists():
-        raise FileNotFoundError(f"FAISS index not found: {index_path}")
-
-    chunks = [
-        ChunkedDocument(
-            page_content=row["page_content"],
-            metadata=row.get("metadata", {}),
-        )
-        for row in read_jsonl(index_dir / CHUNKS_FILE_NAME)
-    ]
-    parents = [
-        ParentDocument(
-            page_content=row["page_content"],
-            metadata=row.get("metadata", {}),
-        )
-        for row in read_jsonl(index_dir / PARENTS_FILE_NAME)
-    ]
-    parent_child_map = read_json(index_dir / PARENT_CHILD_MAP_FILE_NAME)
-    metadata = read_json(index_dir / META_FILE_NAME)
-    saved_model_name = metadata.get("embedding_model")
+) -> CourseDocstoreIndex:
+    snapshot = load_docstore_snapshot(resolve_path(docstore_path))
+    saved_model_name = snapshot.metadata.get("embedding_model")
     selected_model_name = saved_model_name or model_name or DEFAULT_EMBEDDING_MODEL
-
-    index = faiss.read_index(str(index_path))
-    if index.ntotal != len(chunks):
-        raise ValueError(
-            "Persisted FAISS index and chunks are inconsistent: "
-            f"{index.ntotal} vectors vs {len(chunks)} chunks"
-        )
     if saved_model_name and model_name and saved_model_name != model_name:
         logger.warning(
-            "Ignoring requested embedding model %s because the saved index was "
-            "built with %s. Use --rebuild to create a new index with another model.",
+            "Ignoring requested embedding model %s because the docstore was built "
+            "with %s. Rebuild the docstore to change embedding model.",
             model_name,
             saved_model_name,
         )
-
-    return CourseVectorIndex(
-        index=index,
-        chunks=chunks,
-        parents=parents,
-        parent_child_map=parent_child_map,
-        metadata=metadata,
+    return CourseDocstoreIndex(
+        chunks=snapshot.chunks,
+        parents=snapshot.parents,
+        parent_child_map=snapshot.parent_child_map,
+        metadata=snapshot.metadata,
         model_name=selected_model_name,
         model_cache_root=model_cache_root,
+        docstore_path=snapshot.docstore_path,
+        counts=snapshot.counts,
     )
 
 
-def save_vector_index(vector_index: CourseVectorIndex, index_dir: Path) -> None:
-    """Persist FAISS index, chunks, parent contexts, and metadata."""
-
-    index_dir.mkdir(parents=True, exist_ok=True)
-    faiss.write_index(vector_index.index, str(index_dir / INDEX_FILE_NAME))
-    write_jsonl(
-        index_dir / CHUNKS_FILE_NAME,
-        (chunk.to_dict() for chunk in vector_index.chunks),
-    )
-    write_jsonl(
-        index_dir / PARENTS_FILE_NAME,
-        (parent.to_dict() for parent in vector_index.parents),
-    )
-    write_json(index_dir / PARENT_CHILD_MAP_FILE_NAME, vector_index.parent_child_map)
-    write_json(index_dir / META_FILE_NAME, vector_index.metadata)
-    logger.info("Saved vector index to %s", index_dir)
+def has_saved_docstore(docstore_path: Path = DEFAULT_DOCSTORE_PATH) -> bool:
+    return has_docstore_snapshot(resolve_path(docstore_path))
 
 
 def load_embedding_model(
@@ -542,19 +487,6 @@ def encode_texts(
     return np.ascontiguousarray(embeddings.astype("float32"))
 
 
-def has_saved_index(index_dir: Path) -> bool:
-    return all(
-        (index_dir / filename).exists()
-        for filename in (
-            INDEX_FILE_NAME,
-            CHUNKS_FILE_NAME,
-            PARENTS_FILE_NAME,
-            PARENT_CHILD_MAP_FILE_NAME,
-            META_FILE_NAME,
-        )
-    )
-
-
 def summarize_chunk_source(chunk: ChunkedDocument) -> dict[str, Any]:
     metadata = chunk.metadata
     return {
@@ -565,6 +497,7 @@ def summarize_chunk_source(chunk: ChunkedDocument) -> dict[str, Any]:
         "asset_path": metadata.get("asset_path"),
         "parser_backend": metadata.get("parser_backend"),
         "source": metadata.get("source"),
+        "source_name": metadata.get("source_name"),
         "course": metadata.get("course"),
         "category": metadata.get("category"),
         "page": metadata.get("page"),
@@ -593,30 +526,34 @@ def format_search_results(results: Iterable[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def summarize_vector_index(vector_index: CourseVectorIndex, index_dir: Path) -> dict[str, Any]:
-    stats = vector_index.metadata.get("chunk_stats") or {}
+def summarize_docstore_index(index: CourseDocstoreIndex) -> dict[str, Any]:
+    stats = index.metadata.get("chunk_stats") or {}
     return {
-        "index_dir": safe_repo_relative(resolve_path(index_dir)),
-        "vectors": vector_index.index.ntotal,
-        "embedding_model": vector_index.metadata.get("embedding_model"),
-        "embedding_dimension": vector_index.metadata.get("embedding_dimension"),
-        "use_evidence": vector_index.metadata.get("use_evidence", False),
-        "include_visual_evidence": vector_index.metadata.get("include_visual_evidence", False),
-        "include_table_evidence": vector_index.metadata.get("include_table_evidence", False),
-        "evidence_cache_path": vector_index.metadata.get("evidence_cache_path"),
-        "evidence_pipeline_version": vector_index.metadata.get("evidence_pipeline_version"),
-        "visual_evidence_stats": vector_index.metadata.get("visual_evidence_stats"),
-        "table_evidence_stats": vector_index.metadata.get("table_evidence_stats"),
+        "docstore_path": safe_path(index.docstore_path),
+        "backend": "milvus",
+        "vectors": index.index.ntotal,
+        "embedding_model": index.metadata.get("embedding_model"),
+        "embedding_dimension": index.metadata.get("embedding_dimension"),
+        "documents": index.counts.get("documents"),
+        "evidence_count": index.counts.get("evidence"),
+        "chunks": index.counts.get("chunks", len(index.chunks)),
+        "parents": index.counts.get("parents", len(index.parents)),
+        "chunk_parent_mappings": index.counts.get("chunk_parent_mappings"),
+        "use_evidence": index.metadata.get("use_evidence", False),
+        "include_visual_evidence": index.metadata.get("include_visual_evidence", False),
+        "include_table_evidence": index.metadata.get("include_table_evidence", False),
+        "evidence_cache_path": index.metadata.get("evidence_cache_path"),
+        "evidence_pipeline_version": index.metadata.get("evidence_pipeline_version"),
+        "visual_evidence_stats": index.metadata.get("visual_evidence_stats"),
+        "table_evidence_stats": index.metadata.get("table_evidence_stats"),
         "source_files": stats.get("source_files"),
-        "chunks": stats.get("chunks"),
-        "parents": stats.get("parents"),
         "avg_chunk_chars": stats.get("avg_chars"),
         "chunks_by_file_type": stats.get("chunks_by_file_type"),
     }
 
 
 def preview_text(text: str, max_chars: int = 220) -> str:
-    compact = " ".join(text.split())
+    compact = " ".join(str(text).split())
     if len(compact) <= max_chars:
         return compact
     return compact[: max_chars - 3].rstrip() + "..."
@@ -661,6 +598,13 @@ def safe_repo_relative(path: Path) -> str:
         return path.resolve().as_posix()
 
 
+def safe_path(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
 def default_model_cache_root() -> Path:
     return COURSE_RAG_ROOT / "data" / "processed" / "model_cache" / "huggingface"
 
@@ -683,10 +627,8 @@ def configure_stdio() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--query", default=None, help="Question to search for.")
-    parser.add_argument("--top-k", type=int, default=5, help="Number of chunks to return.")
-    parser.add_argument("--rebuild", action="store_true", help="Rebuild even if an index exists.")
-    parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
+    parser.add_argument("--rebuild", action="store_true", help="Rebuild the SQLite docstore.")
+    parser.add_argument("--docstore-path", type=Path, default=DEFAULT_DOCSTORE_PATH)
     parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--manifest", type=Path, default=REPO_ROOT / LOADER_DEFAULT_MANIFEST_PATH)
     parser.add_argument("--priority", default="mvp,v2")
@@ -696,95 +638,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--chunk-overlap", type=int, default=80)
     parser.add_argument("--no-parent-context", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--strict", action="store_true")
-    parser.add_argument("--json", action="store_true", help="Print search results as JSON.")
     parser.add_argument(
         "--no-evidence",
         action="store_true",
-        help="Bypass the V2 text evidence layer when rebuilding a legacy text index.",
+        help="Bypass the V2 text evidence layer when rebuilding a legacy text corpus.",
     )
-    parser.add_argument(
-        "--evidence-cache",
-        type=Path,
-        default=DEFAULT_TEXT_EVIDENCE_CACHE_PATH,
-        help="JSONL cache path for generated text evidence.",
-    )
-    parser.add_argument(
-        "--evidence-pipeline-version",
-        default=DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION,
-        help="Pipeline version stored on generated evidence metadata.",
-    )
-    parser.add_argument(
-        "--no-evidence-cache",
-        action="store_true",
-        help="Do not write the generated evidence JSONL cache.",
-    )
-    parser.add_argument(
-        "--combined-evidence-cache",
-        type=Path,
-        default=DEFAULT_COMBINED_EVIDENCE_CACHE_PATH,
-        help="JSONL cache path for combined text/image/OCR/caption evidence.",
-    )
-    parser.add_argument(
-        "--no-visual-evidence",
-        action="store_true",
-        help="Disable V2 image, OCR, and caption evidence when rebuilding.",
-    )
-    parser.add_argument(
-        "--no-table-evidence",
-        action="store_true",
-        help="Disable V2 table evidence when rebuilding.",
-    )
-    parser.add_argument(
-        "--run-ocr",
-        action="store_true",
-        help="Run offline OCR for missing visual targets before rebuilding the index.",
-    )
-    parser.add_argument(
-        "--ocr-provider",
-        default=DEFAULT_OCR_PROVIDER,
-        help="Offline OCR provider. Default uses the installed RapidOCR runtime.",
-    )
-    parser.add_argument(
-        "--run-caption",
-        action="store_true",
-        help="Run optional offline VLM caption generation for missing visual targets.",
-    )
-    parser.add_argument(
-        "--caption-provider",
-        default=DEFAULT_CAPTION_PROVIDER,
-        help="Offline caption provider. Use llama-cpp-cli when configured.",
-    )
-    parser.add_argument(
-        "--visual-limit",
-        type=int,
-        default=None,
-        help="Optional limit for image metadata and visual targets, useful for smoke tests.",
-    )
-    parser.add_argument(
-        "--ocr-max-pdf-pages",
-        type=int,
-        default=None,
-        help="Optional per-PDF page profile/render limit for PDF OCR smoke tests.",
-    )
-    parser.add_argument(
-        "--pdf-page-low-text-chars",
-        type=int,
-        default=DEFAULT_PDF_PAGE_LOW_TEXT_CHARS,
-        help="Per-page text-layer character threshold for PDF OCR candidates.",
-    )
-    parser.add_argument(
-        "--caption-max-items",
-        type=int,
-        default=None,
-        help="Optional caption item limit for VLM smoke tests.",
-    )
-    parser.add_argument(
-        "--no-progress",
-        action="store_true",
-        help="Disable embedding progress bar.",
-    )
+    parser.add_argument("--evidence-cache", type=Path, default=DEFAULT_TEXT_EVIDENCE_CACHE_PATH)
+    parser.add_argument("--evidence-pipeline-version", default=DEFAULT_TEXT_EVIDENCE_PIPELINE_VERSION)
+    parser.add_argument("--no-evidence-cache", action="store_true")
+    parser.add_argument("--combined-evidence-cache", type=Path, default=DEFAULT_COMBINED_EVIDENCE_CACHE_PATH)
+    parser.add_argument("--no-visual-evidence", action="store_true")
+    parser.add_argument("--no-table-evidence", action="store_true")
+    parser.add_argument("--run-ocr", action="store_true")
+    parser.add_argument("--ocr-provider", default=DEFAULT_OCR_PROVIDER)
+    parser.add_argument("--run-caption", action="store_true")
+    parser.add_argument("--caption-provider", default=DEFAULT_CAPTION_PROVIDER)
+    parser.add_argument("--visual-limit", type=int, default=None)
+    parser.add_argument("--ocr-max-pdf-pages", type=int, default=None)
+    parser.add_argument("--pdf-page-low-text-chars", type=int, default=DEFAULT_PDF_PAGE_LOW_TEXT_CHARS)
+    parser.add_argument("--caption-max-items", type=int, default=None)
     return parser.parse_args()
 
 
@@ -792,8 +665,8 @@ def main() -> None:
     configure_stdio()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = parse_args()
-    vector_index = build_or_load_vector_index(
-        index_dir=args.index_dir,
+    index = build_or_load_docstore_index(
+        docstore_path=args.docstore_path,
         model_name=args.model,
         manifest_path=args.manifest,
         priority=args.priority,
@@ -804,9 +677,7 @@ def main() -> None:
         chunk_overlap=args.chunk_overlap,
         use_parent_context=not args.no_parent_context,
         rebuild=args.rebuild,
-        batch_size=args.batch_size,
         strict=args.strict,
-        show_progress_bar=not args.no_progress,
         use_evidence=not args.no_evidence,
         evidence_cache_path=args.evidence_cache,
         evidence_pipeline_version=args.evidence_pipeline_version,
@@ -823,21 +694,7 @@ def main() -> None:
         pdf_page_low_text_chars=args.pdf_page_low_text_chars,
         caption_max_items=args.caption_max_items,
     )
-
-    print(
-        json.dumps(
-            summarize_vector_index(vector_index, args.index_dir),
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-
-    if args.query:
-        results = vector_index.search(args.query, top_k=args.top_k)
-        if args.json:
-            print(json.dumps(results, ensure_ascii=False, indent=2))
-        else:
-            print(format_search_results(results))
+    print(json.dumps(summarize_docstore_index(index), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

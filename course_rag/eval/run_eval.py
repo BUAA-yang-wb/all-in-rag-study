@@ -27,10 +27,9 @@ from course_rag.app.rag.generation import (  # noqa: E402
     answer_question,
     load_dotenv_if_available,
 )
+from course_rag.app.rag.docstore import DEFAULT_DOCSTORE_PATH  # noqa: E402
 from course_rag.app.rag.indexing import (  # noqa: E402
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_INDEX_DIR,
-    build_or_load_vector_index,
 )
 from course_rag.app.rag.milvus_index import (  # noqa: E402
     DEFAULT_MILVUS_COLLECTION,
@@ -110,7 +109,6 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         profile["judge"] = "none"
     if args.judge is not None:
         profile["judge"] = args.judge
-    profile["index_backend"] = args.index_backend
     profile["milvus_uri"] = args.milvus_uri
     profile["milvus_collection"] = args.milvus_collection
 
@@ -123,7 +121,7 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         profile["judge"] = "none"
         llm_disabled_reason = f"Missing API key environment variable: {args.api_key_env}"
 
-    vector_index = load_index_for_backend(args, args.index_backend)
+    vector_index = load_milvus_index(args)
 
     judge = None
     if profile.get("judge") == "llm":
@@ -146,23 +144,14 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     metrics = aggregate_metrics(case_reports)
-    comparison = None
-    if args.compare_index_backend is not None:
-        comparison = compare_with_backend(
-            args=args,
-            samples=samples,
-            profile=profile,
-            primary_reports=case_reports,
-            compare_backend=args.compare_index_backend,
-        )
     return {
         "run": {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "profile": args.profile,
-            "index_backend": args.index_backend,
+            "retrieval_backend": "milvus",
             "dataset": safe_path(args.dataset),
             "sample_count": len(samples),
-            "index_dir": safe_path(args.index_dir),
+            "docstore_path": safe_path(args.docstore_path),
             "embedding_model": args.embedding_model,
             "llm_model": args.llm_model,
             "llm_base_url": args.llm_base_url,
@@ -177,104 +166,18 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
             },
         },
         "metrics": metrics,
-        "comparison": comparison,
+        "comparison": None,
         "cases": case_reports,
     }
 
 
-def load_index_for_backend(args: argparse.Namespace, index_backend: str) -> Any:
-    if index_backend == "faiss":
-        return build_or_load_vector_index(
-            index_dir=args.index_dir,
-            model_name=args.embedding_model,
-            show_progress_bar=False,
-        )
-    if index_backend == "milvus":
-        return build_or_load_milvus_text_index(
-            index_dir=args.index_dir,
-            model_name=args.embedding_model,
-            uri=args.milvus_uri,
-            collection_name=args.milvus_collection,
-        )
-    raise ValueError(f"unsupported index_backend: {index_backend}")
-
-
-def compare_with_backend(
-    *,
-    args: argparse.Namespace,
-    samples: list[dict[str, Any]],
-    profile: dict[str, Any],
-    primary_reports: list[dict[str, Any]],
-    compare_backend: str,
-) -> dict[str, Any]:
-    compare_index = load_index_for_backend(args, compare_backend)
-    case_comparisons: list[dict[str, Any]] = []
-    for sample, primary_report in zip(samples, primary_reports):
-        request = build_request(sample.get("request", {}), profile)
-        request["index_backend"] = compare_backend
-        request["use_llm"] = False
-        config = GenerationConfig(**request)
-        result: dict[str, Any] | None = None
-        error: str | None = None
-        started = time.perf_counter()
-        try:
-            result = answer_question(
-                sample["question"],
-                index_dir=args.index_dir,
-                embedding_model=args.embedding_model,
-                config=config,
-                vector_index=compare_index,
-            )
-        except Exception as exc:  # noqa: BLE001 - comparison should keep reporting.
-            error = str(exc)
-        latency_ms = round((time.perf_counter() - started) * 1000, 1)
-
-        primary_ids = retrieval_chunk_ids(
-            ((primary_report.get("result") or {}).get("retrieval") or [])
-        )
-        compare_ids = retrieval_chunk_ids((result or {}).get("retrieval", []))
-        case_comparisons.append(
-            {
-                "id": sample.get("id"),
-                "task_type": sample.get("task_type"),
-                "primary_backend": args.index_backend,
-                "compare_backend": compare_backend,
-                "primary_top1": primary_ids[0] if primary_ids else None,
-                "compare_top1": compare_ids[0] if compare_ids else None,
-                "overlap_at_k": overlap_ratio(primary_ids, compare_ids),
-                "primary_chunk_ids": primary_ids,
-                "compare_chunk_ids": compare_ids,
-                "latency_ms": latency_ms,
-                "error": error,
-            }
-        )
-
-    overlaps = [
-        item["overlap_at_k"]
-        for item in case_comparisons
-        if item.get("overlap_at_k") is not None
-    ]
-    changed_top1 = [
-        item
-        for item in case_comparisons
-        if item.get("primary_top1") != item.get("compare_top1")
-    ]
-    errors = [item for item in case_comparisons if item.get("error")]
-    return {
-        "primary_backend": args.index_backend,
-        "compare_backend": compare_backend,
-        "case_count": len(case_comparisons),
-        "overlap_at_k_avg": round(statistics.mean(overlaps), 4) if overlaps else None,
-        "changed_top1_rate": round(len(changed_top1) / len(case_comparisons), 4)
-        if case_comparisons
-        else None,
-        "error_rate": round(len(errors) / len(case_comparisons), 4)
-        if case_comparisons
-        else None,
-        "changed_top1_case_ids": [item["id"] for item in changed_top1],
-        "error_case_ids": [item["id"] for item in errors],
-        "cases": case_comparisons,
-    }
+def load_milvus_index(args: argparse.Namespace) -> Any:
+    return build_or_load_milvus_text_index(
+        docstore_path=args.docstore_path,
+        model_name=args.embedding_model,
+        uri=args.milvus_uri,
+        collection_name=args.milvus_collection,
+    )
 
 
 def evaluate_sample(
@@ -293,7 +196,7 @@ def evaluate_sample(
     try:
         result = answer_question(
             sample["question"],
-            index_dir=args.index_dir,
+            docstore_path=args.docstore_path,
             embedding_model=args.embedding_model,
             config=config,
             vector_index=vector_index,
@@ -741,7 +644,8 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "",
         f"- Time: `{run['timestamp']}`",
         f"- Profile: `{run['profile']}`",
-        f"- Index backend: `{run['index_backend']}`",
+        f"- Retrieval backend: `{run['retrieval_backend']}`",
+        f"- Docstore: `{run['docstore_path']}`",
         f"- Samples: `{run['sample_count']}`",
         f"- Use LLM: `{run['use_llm']}`",
         f"- Judge: `{run['judge']}`",
@@ -927,9 +831,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET_PATH)
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
     parser.add_argument("--doc-path", type=Path, default=DEFAULT_DOC_PATH)
-    parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
-    parser.add_argument("--index-backend", choices=("faiss", "milvus"), default="milvus")
-    parser.add_argument("--compare-index-backend", choices=("faiss", "milvus"), default=None)
+    parser.add_argument("--docstore-path", type=Path, default=DEFAULT_DOCSTORE_PATH)
     parser.add_argument("--milvus-uri", default=DEFAULT_MILVUS_URI)
     parser.add_argument("--milvus-collection", default=DEFAULT_MILVUS_COLLECTION)
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)

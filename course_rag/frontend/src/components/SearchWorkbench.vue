@@ -19,7 +19,6 @@ const emit = defineEmits<{
 const localError = ref("");
 const form = reactive<SearchFormState>({
   query: "",
-  index_backend: "milvus",
   milvus_uri: "http://localhost:19530",
   milvus_collection: "course_rag_v2_text",
   top_k: 5,
